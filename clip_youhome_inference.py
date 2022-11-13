@@ -1,3 +1,4 @@
+#for baseline clip inference and analysis
 import torch
 import clip
 from PIL import Image
@@ -7,17 +8,26 @@ from tqdm import tqdm
 from scipy import stats
 import cv2
 
-#From confusion matrix
+#for confusion matrix
 import matplotlib.pyplot as plt
 from sklearn import metrics
 import seaborn as sns
 
+#for Adaptation module training
+import torch.nn as nn
+import torch.optim as optim
+import torchvision
+
 
 #Parameters to set each fun
 with_subevents = True
-all_frames = True
+all_frames = False
+top5 = True
 DEBUG = 0 #note debug only runs one iteration
-run_name=f"with_subevents_{with_subevents}_all_frames_{all_frames}" #all_frames_with_subevents"
+if DEBUG:
+    run_name='debugging'
+else:
+    run_name=f"with_subevents_{with_subevents}_all_frames_{all_frames},top5{top5}" #all_frames_with_subevents"
 
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -27,37 +37,8 @@ model, preprocess = clip.load("ViT-B/32", device=device)
 
 template = "A person is "
 words = ["cooking","drinking","eating","exercising","getting up", "laying", "napping", "playing","reading","using something","watching TV", "writing"]
-# sentances = {"Cook.Cut"             :"cooking by cutting something.",
-#             "Cook.Usemicrowave"     :"cooking using a microwave",
-#             "Cook.Useoven"          :"cooking using an oven",
-#             "Cook.Usestove"         :"cooking using a stove",
-#             "Drink.Frombottle"      :"drinking from a bottle",
-#             "Drink.Fromcup"         :"drinking from a cup",
-#             "Eat.Snack"             :"eating a snack",
-#             "Eat.Useutensil"        :"eating using a utensil",
-#             "Exercise"              :"exercising",
-#             "Getup"                 :"getting up",
-#             "Lay.Onbed"             :"laying on a bed",
-#             "Nap"                   :"napping",
-#             "Play.Boardgame"        :"playing a boardgame",
-#             "Read"                  :"reading",
-#             "Use.Coffeemachine"     :"using a coffee machine",
-#             "Use.Computer"          :"using a computer",
-#             "Use.Dishwasher"        :"using a dishwasher",
-#             "Use.Gamecontroller"    :"using a gname controller",
-#             "Use.Kettle"            :"using a kettle",
-#             "Use.Mop"               :"using a mop",
-#             "Use.Phone"             :"using a phone",
-#             "Use.Refrig"            :"using a refrigerator",
-#             "Use.Shelf"             :"using a shelf",
-#             "Use.Sink"              :"using a sink",
-#             "Use.Switch"            :"using a ninetendo switch",
-#             "Use.Tablet"            :"using a tablet",
-#             "Use.Vaccum"            :"using a vaccum",
-#             "Watch.TV"              :"watching TV",
-#             "Write"                 :"writing"
-#             }
-#need to be parallel arrays to maintain order (traversing dict does not maintain order...)
+
+#needs to be parallel arrays (not dict) to maintain order (traversing dict does not maintain order...)
 sentances = ["cooking by cutting something.",
             "cooking using a microwave",
             "cooking using an oven",
@@ -188,23 +169,69 @@ ground_truths =[]
 dataset = YouHomeDataset()
 dataloader = torch.utils.data.DataLoader(dataset, batch_size=32, shuffle=False)
 
-# for imgs, labels in dataloader:
-#     print("Batch of images has shape: ",imgs.shape)
-#     print("Batch of labels has shape: ", labels.shape)
+
+
+
+
+
+
+
+
+"""
+#training adaption module
+adapt_model = torchvision.models.resnet18(pretrained=False)
+num_features = adapt_model.fc.in_features #need to change output to match our number of classes
+adapt_model.fc = nn.Linear(num_features, len(gt_labels))
+adapt_model = adapt_model.to(device)
+criterion =  nn.CrossEntropyLoss()
+optimizer = optim.SGD(adapt_model.parameters(),lr=.001, momentum=.9)
+
+num_epochs = 10
+for epoch in range(num_epochs):
+    adapt_model.train()
+    running_loss = 0.
+
+"""
+
+
+
+
+
+
+    
+#This loop is for performing testing/evaluation
 for ind, ((images,files),labels) in tqdm(enumerate(dataloader)):
     # print(type(images)) #it's a torch tensor
     with torch.no_grad():
         image_features = model.encode_image(images)
         text_features = model.encode_text(text)
         
-        logits_per_image, logits_per_text = model(images, text)
-        if DEBUG: print("logits_img",logits_per_image.shape)
-        if DEBUG: print("logits_text",logits_per_text.shape)
-        probs = logits_per_image.softmax(dim=-1).cpu().numpy()
-        if DEBUG: print("probs.shape",probs.shape)
-        pred = np.argmax(probs,axis=-1) #if we have a batch of n, we should have n maxes
-        if DEBUG: print("pred shape", pred.shape, pred)
-        if DEBUG: print("labels shape", labels.shape, labels)
+        if top5:
+            # Pick the top 5 most similar labels for the image
+            image_features /= image_features.norm(dim=-1, keepdim=True)
+            text_features /= text_features.norm(dim=-1, keepdim=True)
+            similarity = (100.0 * image_features @ text_features.T).softmax(dim=-1)
+            if DEBUG: print("img_features",image_features.shape,"txt_features",text_features.shape, "Similarity",similarity.shape)
+            values, indices = similarity.topk(5,dim=1) #returns [batch_size,5] tensors
+            if DEBUG: print("values",values.shape, "indices",indices.shape)
+            pred = indices[:,0].cpu().numpy()
+
+            if DEBUG:
+                indices = indices[0]
+                values = values[0,:]
+                print("\nTop predictions:\n")
+                for value, index in zip(values, indices):
+                    print(f"{gt_labels[index]:>16s}: {100 * value.item():.2f}%")
+                print("Actual value", gt_labels[labels[0]])
+        else:
+            logits_per_image, logits_per_text = model(images, text)
+            if DEBUG: print("logits_img",logits_per_image.shape)
+            if DEBUG: print("logits_text",logits_per_text.shape)
+            probs = logits_per_image.softmax(dim=-1).cpu().numpy()
+            if DEBUG: print("probs.shape",probs.shape)
+            pred = np.argmax(probs,axis=-1) #if we have a batch of n, we should have n maxes
+            if DEBUG: print("pred shape", pred.shape, pred)
+            if DEBUG: print("labels shape", labels.shape, labels)
 
         predictions = np.concatenate((predictions,pred))
         ground_truths = np.concatenate((ground_truths,labels))
@@ -235,13 +262,11 @@ print('total number', len(predictions))
 acc = correct_count/len(predictions)
 print('Accuracy=',acc)
 # print("Label probs:", probs)  # prints: [[0.9927937  0.00421068 0.00299572]]
-
 saved = np.vstack((ground_truths,predictions))
 print("saved array size = ",saved.shape)
-
 np.save("array_saves/"+run_name+'.npy',saved)
 
-
+#https://stackoverflow.com/questions/65618137/confusion-matrix-for-multiple-classes-in-python
 cm = metrics.confusion_matrix(ground_truths,predictions,labels=list(range(len(dataset.debug_labels_text))))
 # Plot confusion matrix in a beautiful manner
 fig = plt.figure(figsize=(30,30))
@@ -253,13 +278,10 @@ ax.xaxis.set_label_position('bottom')
 plt.xticks(rotation=90)
 ax.xaxis.set_ticklabels(dataset.debug_labels_text, fontsize = 10)
 ax.xaxis.tick_bottom()
-
 ax.set_ylabel('True', fontsize=20)
 ax.yaxis.set_ticklabels(dataset.debug_labels_text, fontsize = 10)
 plt.yticks(rotation=0)
-
 plt.title(run_name+f"_Acc:{acc}", fontsize=20)
-
 plt.savefig(run_name+'.png')
 plt.show()
 
