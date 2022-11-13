@@ -10,8 +10,8 @@ from scipy import stats
 device = "cuda" if torch.cuda.is_available() else "cpu"
 model, preprocess = clip.load("ViT-B/32", device=device)
 # template = "A picture of a person "
-with_subevents = True
-all_frames = True
+with_subevents = False
+all_frames = False
 template = "A person is "
 words = ["cooking","drinking","eating","exercising","getting up", "laying", "napping", "playing","reading","using something","watching TV", "writing"]
 sentances = ["cooking by cutting something.",
@@ -102,9 +102,10 @@ for ind, imgs in tqdm(enumerate(test_imgs)):
         pred = np.argmax(probs)
         per_frame_predictions.append(pred)
     
-    pred = stats.mode(per_frame_predictions)
+    pred = stats.mode(per_frame_predictions)[0][0] #stats.mode returns an tuple(mode_arr, count_arr))
     predictions.append(pred)
     if pred==test_gt[ind]:
+        print("Correct prediction at ",img_file)
         correct_count+=1
     # print("predicted",labels[pred], "gt", labels[test_gt[ind]])
     # break
