@@ -18,6 +18,8 @@ import torch.nn as nn
 import torch.optim as optim
 import torchvision
 
+from sklearn.linear_model import LogisticRegression
+
 
 #Parameters to set each fun
 with_subevents = True
@@ -107,9 +109,9 @@ class YouHomeDataset(torch.utils.data.Dataset):
     """
    using help from : https://medium.com/analytics-vidhya/creating-a-custom-dataset-and-dataloader-in-pytorch-76f210a1df5d
     """
-    def __init__(self):
+    def __init__(self,base_dir):
         #extract just gt labels
-        base = "/home/abhi/research/SmartHome/Data/youhome_mp4_data/mp4data"
+        base = base_dir
         labels_text = gt_labels
         if not with_subevents:
             new_list = []
@@ -166,117 +168,133 @@ class YouHomeDataset(torch.utils.data.Dataset):
 correct_count = 0
 predictions=[]
 ground_truths =[]
-dataset = YouHomeDataset()
-dataloader = torch.utils.data.DataLoader(dataset, batch_size=32, shuffle=False)
+dataset_train = YouHomeDataset("/home/abhi/research/SmartHome/Data/youhome_mp4_data/train_split")
+dataset_test = YouHomeDataset("/home/abhi/research/SmartHome/Data/youhome_mp4_data/test_split")
+# dataloader = torch.utils.data.DataLoader(dataset, batch_size=32, shuffle=False)
 
 
-
-"""
-#training adaption module
-adapt_model = torchvision.models.resnet18(pretrained=False)
-num_features = adapt_model.fc.in_features #need to change output to match our number of classes
-adapt_model.fc = nn.Linear(num_features, len(gt_labels))
-adapt_model = adapt_model.to(device)
-criterion =  nn.CrossEntropyLoss()
-optimizer = optim.SGD(adapt_model.parameters(),lr=.001, momentum=.9)
-
-num_epochs = 10
-for epoch in range(num_epochs):
-    adapt_model.train()
-    running_loss = 0.
-
-"""
-
-
-
-
-
-
+def get_features(dataset):
+    all_features = []
+    all_labels = []
     
-#This loop is for performing testing/evaluation
-for ind, ((images,files),labels) in tqdm(enumerate(dataloader)):
-    # print(type(images)) #it's a torch tensor
     with torch.no_grad():
-        image_features = model.encode_image(images)
-        text_features = model.encode_text(text)
+        for (images,files), labels in tqdm(torch.utils.data.DataLoader(dataset, batch_size=100)):
+            features = model.encode_image(images.to(device))
+
+            all_features.append(features)
+            all_labels.append(labels)
+
+    return torch.cat(all_features).cpu().numpy(), torch.cat(all_labels).cpu().numpy()
+
+# Calculate the image features
+train_features, train_labels = get_features(dataset_train)
+test_features, test_labels = get_features(dataset_test)
+
+#sweep cs to find best performance
+vals = []
+cs = np.arange(0,1.01,.01)
+for c in cs:
+    # Perform logistic regression
+    classifier = LogisticRegression(random_state=0,C=c, max_iter=1000, verbose=0) #C=0.316, max_iter=1000, verbose=0)
+    classifier.fit(train_features, train_labels)
+
+    # Evaluate using the logistic regression classifier
+    predictions = classifier.predict(test_features)
+    accuracy = np.mean((test_labels == predictions).astype(np.float)) * 100.
+    print(f"\nC={c} Accuracy = {accuracy:.3f}")
+    vals.append(accuracy)
+    
+m = np.max(vals)
+ind = np.argmax(vals)
+print(f"Maximum accuracy of {m} at C={cs[ind]}")
+
+# #This loop is for performing testing/evaluation
+# for ind, ((images,files),labels) in tqdm(enumerate(dataloader)):
+#     # print(type(images)) #it's a torch tensor
+#     with torch.no_grad():
+#         image_features = model.encode_image(images)
+#         text_features = model.encode_text(text)
         
-        if top5:
-            # Pick the top 5 most similar labels for the image
-            image_features /= image_features.norm(dim=-1, keepdim=True)
-            text_features /= text_features.norm(dim=-1, keepdim=True)
-            similarity = (100.0 * image_features @ text_features.T).softmax(dim=-1)
-            if DEBUG: print("img_features",image_features.shape,"txt_features",text_features.shape, "Similarity",similarity.shape)
-            values, indices = similarity.topk(5,dim=1) #returns [batch_size,5] tensors
-            if DEBUG: print("values",values.shape, "indices",indices.shape)
-            pred = indices[:,0].cpu().numpy()
+#         if top5:
+#             # Pick the top 5 most similar labels for the image
+#             image_features /= image_features.norm(dim=-1, keepdim=True)
+#             text_features /= text_features.norm(dim=-1, keepdim=True)
+#             similarity = (100.0 * image_features @ text_features.T).softmax(dim=-1)
+#             if DEBUG: print("img_features",image_features.shape,"txt_features",text_features.shape, "Similarity",similarity.shape)
+#             values, indices = similarity.topk(5,dim=1) #returns [batch_size,5] tensors
+#             if DEBUG: print("values",values.shape, "indices",indices.shape)
+#             pred = indices[:,0].cpu().numpy()
 
-            if DEBUG:
-                indices = indices[0]
-                values = values[0,:]
-                print("\nTop predictions:\n")
-                for value, index in zip(values, indices):
-                    print(f"{gt_labels[index]:>16s}: {100 * value.item():.2f}%")
-                print("Actual value", gt_labels[labels[0]])
-        else:
-            logits_per_image, logits_per_text = model(images, text)
-            if DEBUG: print("logits_img",logits_per_image.shape)
-            if DEBUG: print("logits_text",logits_per_text.shape)
-            probs = logits_per_image.softmax(dim=-1).cpu().numpy()
-            if DEBUG: print("probs.shape",probs.shape)
-            pred = np.argmax(probs,axis=-1) #if we have a batch of n, we should have n maxes
-            if DEBUG: print("pred shape", pred.shape, pred)
-            if DEBUG: print("labels shape", labels.shape, labels)
+#             if DEBUG:
+#                 indices = indices[0]
+#                 values = values[0,:]
+#                 print("\nTop predictions:\n")
+#                 for value, index in zip(values, indices):
+#                     print(f"{gt_labels[index]:>16s}: {100 * value.item():.2f}%")
+#                 print("Actual value", gt_labels[labels[0]])
+#         else:
+#             logits_per_image, logits_per_text = model(images, text)
+#             if DEBUG: print("logits_img",logits_per_image.shape)
+#             if DEBUG: print("logits_text",logits_per_text.shape)
+#             probs = logits_per_image.softmax(dim=-1).cpu().numpy()
+#             if DEBUG: print("probs.shape",probs.shape)
+#             pred = np.argmax(probs,axis=-1) #if we have a batch of n, we should have n maxes
+#             if DEBUG: print("pred shape", pred.shape, pred)
+#             if DEBUG: print("labels shape", labels.shape, labels)
 
-        predictions = np.concatenate((predictions,pred))
-        ground_truths = np.concatenate((ground_truths,labels))
-        correct_count+=np.sum(pred==labels.cpu().numpy())
-        # if correct_count >=0: print("corrent prediction!")
-        # print("predictions shape",predictions.shape)
+#         predictions = np.concatenate((predictions,pred))
+#         ground_truths = np.concatenate((ground_truths,labels))
+#         correct_count+=np.sum(pred==labels.cpu().numpy())
+#         # if correct_count >=0: print("corrent prediction!")
+#         # print("predictions shape",predictions.shape)
 
-        if DEBUG: break
-        #for debugging:
-        """OKAY this makes it seem like whatever preprcoess() CLIP code is doing is making the image really hard to see and distinguish
-        objects ? Maybe try without this preprocessing? """
-        # print("debugging:")
-        # for i in range(images.shape[0]):
-        #     #this should loop 32 times, one for every elt in batch
-        #     print("file: ",files[i])
-        #     print("predicted",dataset.debug_labels_text[pred[i]], "gt", dataset.debug_labels_text[labels[i]])
-        #     cv2.imshow('img',images[i].permute((1,2,0)).cpu().numpy()) # permute so it's (h,w,c)
-        #     cv2.imshow('img RGB to BRG transformed',images[i].permute((1,2,0)).cpu().numpy()[:,:,::-1])
-        #     cv2.imshow('img without preprocessing',np.array(Image.open(files[i])))
-        #     while(True):
-        #         if cv2.waitKey(1) & 0xFF == ord('q'):
-        #             break
-        #     print()
-        # break
+#         if DEBUG: break
+#         #for debugging:
+#         """OKAY this makes it seem like whatever preprcoess() CLIP code is doing is making the image really hard to see and distinguish
+#         objects ? Maybe try without this preprocessing? """
+#         # print("debugging:")
+#         # for i in range(images.shape[0]):
+#         #     #this should loop 32 times, one for every elt in batch
+#         #     print("file: ",files[i])
+#         #     print("predicted",dataset.debug_labels_text[pred[i]], "gt", dataset.debug_labels_text[labels[i]])
+#         #     cv2.imshow('img',images[i].permute((1,2,0)).cpu().numpy()) # permute so it's (h,w,c)
+#         #     cv2.imshow('img RGB to BRG transformed',images[i].permute((1,2,0)).cpu().numpy()[:,:,::-1])
+#         #     cv2.imshow('img without preprocessing',np.array(Image.open(files[i])))
+#         #     while(True):
+#         #         if cv2.waitKey(1) & 0xFF == ord('q'):
+#         #             break
+#         #     print()
+#         # break
 
-print('number correct:',correct_count)
-print('total number', len(predictions))
-acc = correct_count/len(predictions)
-print('Accuracy=',acc)
-# print("Label probs:", probs)  # prints: [[0.9927937  0.00421068 0.00299572]]
-saved = np.vstack((ground_truths,predictions))
-print("saved array size = ",saved.shape)
-np.save("array_saves/"+run_name+'.npy',saved)
 
-#https://stackoverflow.com/questions/65618137/confusion-matrix-for-multiple-classes-in-python
-cm = metrics.confusion_matrix(ground_truths,predictions,labels=list(range(len(dataset.debug_labels_text))))
-# Plot confusion matrix in a beautiful manner
-fig = plt.figure(figsize=(30,30))
-ax= plt.subplot()
-sns.heatmap(cm, annot=True, ax = ax, fmt = 'g'); #annot=True to annotate cells
-# labels, title and ticks
-ax.set_xlabel('Predicted', fontsize=20)
-ax.xaxis.set_label_position('bottom')
-plt.xticks(rotation=90)
-ax.xaxis.set_ticklabels(dataset.debug_labels_text, fontsize = 10)
-ax.xaxis.tick_bottom()
-ax.set_ylabel('True', fontsize=20)
-ax.yaxis.set_ticklabels(dataset.debug_labels_text, fontsize = 10)
-plt.yticks(rotation=0)
-plt.title(run_name+f"_Acc:{acc}", fontsize=20)
-plt.savefig(run_name+'.png')
-plt.show()
+
+
+# print('number correct:',correct_count)
+# print('total number', len(predictions))
+# acc = correct_count/len(predictions)
+# print('Accuracy=',acc)
+# # print("Label probs:", probs)  # prints: [[0.9927937  0.00421068 0.00299572]]
+# saved = np.vstack((ground_truths,predictions))
+# print("saved array size = ",saved.shape)
+# np.save("array_saves/"+run_name+'.npy',saved)
+
+# #https://stackoverflow.com/questions/65618137/confusion-matrix-for-multiple-classes-in-python
+# cm = metrics.confusion_matrix(ground_truths,predictions,labels=list(range(len(dataset.debug_labels_text))))
+# # Plot confusion matrix in a beautiful manner
+# fig = plt.figure(figsize=(30,30))
+# ax= plt.subplot()
+# sns.heatmap(cm, annot=True, ax = ax, fmt = 'g'); #annot=True to annotate cells
+# # labels, title and ticks
+# ax.set_xlabel('Predicted', fontsize=20)
+# ax.xaxis.set_label_position('bottom')
+# plt.xticks(rotation=90)
+# ax.xaxis.set_ticklabels(dataset.debug_labels_text, fontsize = 10)
+# ax.xaxis.tick_bottom()
+# ax.set_ylabel('True', fontsize=20)
+# ax.yaxis.set_ticklabels(dataset.debug_labels_text, fontsize = 10)
+# plt.yticks(rotation=0)
+# plt.title(run_name+f"_Acc:{acc}", fontsize=20)
+# plt.savefig(run_name+'.png')
+# plt.show()
 
 
