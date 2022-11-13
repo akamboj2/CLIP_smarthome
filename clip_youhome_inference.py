@@ -12,8 +12,8 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 # device = "cpu" #NOTE: DELETE THIS WHEN GPU AVAILABLE
 model, preprocess = clip.load("ViT-B/32", device=device)
 # template = "A picture of a person "
-with_subevents = True
-all_frames = True
+with_subevents = False
+all_frames = False
 template = "A person is "
 words = ["cooking","drinking","eating","exercising","getting up", "laying", "napping", "playing","reading","using something","watching TV", "writing"]
 sentances = ["cooking by cutting something.",
