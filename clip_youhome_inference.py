@@ -18,21 +18,27 @@ import seaborn as sns
 import torch.nn as nn
 import torch.optim as optim
 import torchvision
+from tensorboardX import SummaryWriter
+from pathlib import Path
 
 
 
 #Parameters to set each fun
-with_subevents = True
-all_frames = True
-top5 = False #deprecated Should delete probable
-batch_size = 64
+with_subevents = False
+all_frames = False
+batch_size = 2
 num_epochs = 60
-
 DEBUG = 0 #note debug only runs one iteration
 if DEBUG:
     run_name='debugging'
 else:
     run_name=f"resnet18_with_subevents_{with_subevents}_all_frames_{all_frames}" #all_frames_with_subevents"
+
+#for logging loss and accuracy
+log_dir = Path('log_dir') / run_name 
+log_dir.mkdir(parents=True, exist_ok=True)
+train_writer = SummaryWriter(log_dir/'train')
+val_writer = SummaryWriter(log_dir / 'val')
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -220,11 +226,18 @@ for epoch in range(num_epochs):
         running_loss += loss.item()* images.size(0) #is this a thing? weight by the batch size?
         running_corrects += torch.sum(preds == labels.data) #why labels.data here?
 
+        if ind %100==0:
+            # name, value, iteration
+            train_writer.add_scalar("loss",loss.item(),ind+epoch*len((dataloader_train)))
+
     epoch_loss = running_loss / len(dataset_train)
     epoch_acc = running_corrects / len(dataset_train) * 100
     print('[Train #{}] Loss: {:.4f} Acc: {:.4f}% Time: {:.4f}s'.format(epoch, epoch_loss, epoch_acc, time.time() -start_time))
+    train_writer.add_scalar("epoch_loss",epoch_loss,epoch)
+    train_writer.add_scalar("epoch_acc",epoch_acc,epoch)
 
-
+    print("Intermediate model save as ", 'models/'+run_name+'.pth')
+    torch.save(model.state_dict(), 'models/'+run_name+'.pth')
     if epoch%5 ==0:
         #This loop is for performing testing/evaluation
         adapt_model.eval()
@@ -246,40 +259,8 @@ for epoch in range(num_epochs):
             epoch_loss = running_loss / len(dataset_test)
             epoch_acc = running_corrects / len(dataset_train) * 100.
             print('[Test #{}] Loss: {:.4f} Acc: {:.4f}% Time: {:.4f}s'.format(epoch, epoch_loss, epoch_acc, time.time()- start_time))
-
-                    # if top5:
-                    #     # Pick the top 5 most similar labels for the image
-                    #     image_features /= image_features.norm(dim=-1, keepdim=True)
-                    #     text_features /= text_features.norm(dim=-1, keepdim=True)
-                    #     similarity = (100.0 * image_features @ text_features.T).softmax(dim=-1)
-                    #     if DEBUG: print("img_features",image_features.shape,"txt_features",text_features.shape, "Similarity",similarity.shape)
-                    #     values, indices = similarity.topk(5,dim=1) #returns [batch_size,5] tensors
-                    #     if DEBUG: print("values",values.shape, "indices",indices.shape)
-                    #     pred = indices[:,0].cpu().numpy()
-
-                    #     if DEBUG:
-                    #         indices = indices[0]
-                    #         values = values[0,:]
-                    #         print("\nTop predictions:\n")
-                    #         for value, index in zip(values, indices):
-                    #             print(f"{gt_labels[index]:>16s}: {100 * value.item():.2f}%")
-                    #         print("Actual value", gt_labels[labels[0]])
-                    # else:
-                    #     logits_per_image, logits_per_text = model(images, text)
-                    #     if DEBUG: print("logits_img",logits_per_image.shape)
-                    #     if DEBUG: print("logits_text",logits_per_text.shape)
-                    #     probs = logits_per_image.softmax(dim=-1).cpu().numpy()
-                    #     if DEBUG: print("probs.shape",probs.shape)
-                    #     pred = np.argmax(probs,axis=-1) #if we have a batch of n, we should have n maxes
-                    #     if DEBUG: print("pred shape", pred.shape, pred)
-                    #     if DEBUG: print("labels shape", labels.shape, labels)
-
-                    # predictions = np.concatenate((predictions,pred))
-                    # ground_truths = np.concatenate((ground_truths,labels))
-                    # correct_count+=np.sum(pred==labels.cpu().numpy())
-                    # # if correct_count >=0: print("corrent prediction!")
-                    # # print("predictions shape",predictions.shape)
-
+            val_writer.add_scalar("epoch_loss",epoch_loss,epoch)
+            val_writer.add_scalar("epoch_acc",epoch_acc,epoch)
             if DEBUG: break
 
 
@@ -287,18 +268,9 @@ for epoch in range(num_epochs):
 print("Finished training, saving model as ", 'models/'+run_name+'.pth')
 torch.save(model.state_dict(), 'models/'+run_name+'.pth')
 
-#NOTE: No need to do all of this already given in eval code above! and don't save all the predictions! Already saving model, just rerun if u need predictions
-# print('number correct:',correct_count)
-# print('total number', len(predictions))
-# acc = correct_count/len(predictions)
-# print('Accuracy=',acc)
-# # print("Label probs:", probs)  # prints: [[0.9927937  0.00421068 0.00299572]]
-# saved = np.vstack((ground_truths,predictions))
-# print("saved array size = ",saved.shape)
-# np.save("array_saves/"+run_name+'.npy',saved)
 
 
-print("Performing evaluation")
+print("Performing final evaluation")
 #Run one last evaluation for the confusion matrix
 adapt_model.eval()
 with torch.no_grad():
@@ -348,8 +320,6 @@ plt.show()
 
 
 # TODO: 
-# First Clean up all the comments in this section, everything is pushed so nothing is lost!
-# log on tensorboard
 # setup argparser
 # attemp to make this a custom model and push that
 # try another super lightweight convolution model, maybe even make your own
@@ -359,3 +329,4 @@ plt.show()
 # - try with a different train test split (move one p folder from test to train)
 # - try USING the text embeddings, instead of predicting only from image. 
 #       to do this, output batch_sizex512 vector than do the top5 style similarity score
+# instead of sampling Every frame, sample every 10 frames or 25 frames (25 frames at 25 fps would be 1 hz)
