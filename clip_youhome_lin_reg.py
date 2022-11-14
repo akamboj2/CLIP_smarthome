@@ -23,8 +23,8 @@ from sklearn.linear_model import LogisticRegression
 
 #Parameters to set each fun
 with_subevents = True
-all_frames = False
-top5 = True
+all_frames = True
+top5 = False
 DEBUG = 0 #note debug only runs one iteration
 if DEBUG:
     run_name='debugging'
@@ -192,7 +192,7 @@ test_features, test_labels = get_features(dataset_test)
 
 #sweep cs to find best performance
 vals = []
-cs = np.arange(0,1.01,.01)
+cs = [.19]#np.arange(0,1.01,.001)
 for c in cs:
     # Perform logistic regression
     classifier = LogisticRegression(random_state=0,C=c, max_iter=1000, verbose=0) #C=0.316, max_iter=1000, verbose=0)
