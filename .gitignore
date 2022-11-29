@@ -1,1 +1,4 @@
 models/*
+log_dir/*
+CMs/*
+array_saves/*

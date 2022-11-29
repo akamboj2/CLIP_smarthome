@@ -28,16 +28,18 @@ from pathlib import Path
 #Parameters to set each fun
 with_subevents = True
 all_frames = False
-batch_size = 128
+batch_size = 64
 num_epochs = 60
 train = True
-learning_rate = .001
+learning_rate = .001 #1e-5 #.001
 use_transforms = True
+combine_text = False
 DEBUG = 0 #note debug only runs one iteration
 if DEBUG:
     run_name='debugging'
 else:
-    run_name=f"MLP_with_subevents_{with_subevents}_all_frames_{all_frames}" #all_frames_with_subevents"
+    run_name=f"MLP_with_subevents_{with_subevents}_all_frames_{all_frames}_lr_{learning_rate}_splitv2" #all_frames_with_subevents"
+    # run_name = "solo_resnet18"
 print("Running:", run_name)
 
 #for logging loss and accuracy
@@ -50,6 +52,16 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 
 model, preprocess = clip.load("ViT-B/32", device=device)
 # template = "A picture of a person " #this shows minimal diference in results
+# class dummy(nn.Module):
+#     def forward(self,x):
+#         return x
+#     def encode_image(self,image):
+#         return image
+#     def encode_text(self,text):
+#         return text
+# model, preprocess = dummy(),lambda x: transforms.ToTensor()(x)
+
+
 
 template = "A person is "
 words = ["cooking","drinking","eating","exercising","getting up", "laying", "napping", "playing","reading","using something","watching TV", "writing"]
@@ -204,8 +216,8 @@ if use_transforms:
 else:
     train_transforms = None
 
-dataset_train = YouHomeDataset("/home/abhi/research/SmartHome/Data/youhome_mp4_data/train_split",transforms=train_transforms)
-dataset_test = YouHomeDataset("/home/abhi/research/SmartHome/Data/youhome_mp4_data/test_split")
+dataset_train = YouHomeDataset("/home/abhi/research/SmartHome/Data/youhome_mp4_data/train_split_v2",transforms=train_transforms)
+dataset_test = YouHomeDataset("/home/abhi/research/SmartHome/Data/youhome_mp4_data/test_split_v2")
 dataloader_train = torch.utils.data.DataLoader(dataset_train, batch_size=batch_size, shuffle=True)
 dataloader_test = torch.utils.data.DataLoader(dataset_test, batch_size=batch_size, shuffle=True)
 
@@ -228,13 +240,18 @@ dataloader_test = torch.utils.data.DataLoader(dataset_test, batch_size=batch_siz
 # adapt_model.fc = nn.Linear(num_features, len(gt_labels))
 # adapt_model.conv1 = nn.Sequential(nn.Linear(512,32*32*3),nn.Unflatten(1,(3,32,32)),adapt_model.conv1)
 
+
 #MLP Version:
-adapt_model = torchvision.ops.MLP(512,[256,128,len(gt_labels)])
+if combine_text:
+    adapt_model = torchvision.ops.MLP(len(dataset_test.debug_labels_text),[256,128,len(dataset_test.debug_labels_text)]) #because clip's model.encode(0 results in batch_sizex512)
+else:
+    adapt_model = torchvision.ops.MLP(512,[256,128,len(dataset_test.debug_labels_text)]) #because clip's model.encode(0 results in batch_sizex512)
 
 
 adapt_model = adapt_model.to(device)
 criterion =  nn.CrossEntropyLoss()
-optimizer = optim.Adam(adapt_model.parameters(),lr=learning_rate)#optim.SGD(adapt_model.parameters(),lr=learning_rate, momentum=.9) # lr=.001
+optimizer = optim.Adam(adapt_model.parameters(),lr=learning_rate, weight_decay=1e-5)#optim.SGD(adapt_model.parameters(),lr=learning_rate, momentum=.9) # lr=.001
+scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=25)
 
 start_time = time.time() #(for showing time)
 if train:
@@ -246,7 +263,13 @@ if train:
             image_features = model.encode_image(images.to(device))
             text_features = model.encode_text(text.to(device))
             labels = labels.to(device)
-            # if DEBUG: print("image_features",image_features.shape,"text_features",text_features.shape)
+            if combine_text:
+                image_features_normed = image_features/image_features.norm(dim=-1, keepdim=True)
+                text_features_normed = text_features/text_features.norm(dim=-1, keepdim=True)
+                image_features = image_features_normed @ text_features_normed.T
+                
+
+            if DEBUG: print("image_features",image_features.shape,"text_features",text_features.shape)
             # image_features torch.Size([32, 512]) text_features torch.Size([29, 512])
 
             optimizer.zero_grad()
@@ -271,10 +294,14 @@ if train:
         train_writer.add_scalar("epoch_loss",epoch_loss,epoch)
         train_writer.add_scalar("epoch_acc",epoch_acc,epoch)
 
+        # update the learning rate
+        scheduler.step()
+
         print("Intermediate model save as ", 'models/'+run_name+'.pth')
         torch.save(adapt_model.state_dict(), 'models/'+run_name+'.pth')
         if epoch%5 ==0:
             #This loop is for performing testing/evaluation
+            print("VALIDATING MODEL")
             adapt_model.eval()
             with torch.no_grad():
                 running_loss = 0.
@@ -284,6 +311,11 @@ if train:
                     image_features = model.encode_image(images)
                     text_features = model.encode_text(text)
                     labels = labels.to(device)
+                    if combine_text:
+                        image_features_normed = image_features/image_features.norm(dim=-1, keepdim=True)
+                        text_features_normed = text_features/text_features.norm(dim=-1, keepdim=True)
+                        image_features = image_features_normed @ text_features_normed.T
+
                     if DEBUG: print("image_features",image_features.shape,"text_features",text_features.shape)
 
                     outputs = adapt_model(image_features.float())
@@ -321,6 +353,11 @@ with torch.no_grad():
         image_features = model.encode_image(images)
         text_features = model.encode_text(text)
         labels = labels.to(device)
+        if combine_text:
+            image_features_normed = image_features/image_features.norm(dim=-1, keepdim=True)
+            text_features_normed = text_features/text_features.norm(dim=-1, keepdim=True)
+            image_features = image_features_normed @ text_features_normed.T
+
         if DEBUG: print("image_features",image_features.shape,"text_features",text_features.shape)
 
         outputs = adapt_model(image_features.float())
@@ -373,3 +410,11 @@ plt.show()
     # OR multiply img embedding by text embedding, flatten that matrix and pass that through a few linear layers (MLP) 
     # and train that to output correct classes
 # instead of sampling Every frame, sample every 10 frames or 25 frames (25 frames at 25 fps would be 1 hz)
+# logistic regression with augmented data
+
+""""
+To Ask Neo:
+- 31 events? i'm counting 29 in all the folders
+- what is binary_react dataset?
+- was it tested on Toyota dataset?
+"""
