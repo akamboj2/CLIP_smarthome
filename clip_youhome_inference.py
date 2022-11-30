@@ -23,22 +23,26 @@ from torchvision import transforms
 from tensorboardX import SummaryWriter
 from pathlib import Path
 
+import random
+import argparse
+
 
 
 #Parameters to set each fun
 with_subevents = True
 all_frames = False
 batch_size = 64
-num_epochs = 60
+num_epochs = 200
 train = True
 learning_rate = .001 #1e-5 #.001
 use_transforms = True
 combine_text = False
+use_adaptation_module = False
 DEBUG = 0 #note debug only runs one iteration
 if DEBUG:
     run_name='debugging'
 else:
-    run_name=f"MLP_with_subevents_{with_subevents}_all_frames_{all_frames}_lr_{learning_rate}_splitv2" #all_frames_with_subevents"
+    run_name=f"CLIPZS_with_subevents_{with_subevents}_all_frames_{all_frames}_lr_{learning_rate}_epochs_{num_epochs}_YOLOprecropped" #all_frames_with_subevents"
     # run_name = "solo_resnet18"
 print("Running:", run_name)
 
@@ -130,70 +134,80 @@ gt_labels = ["Cook.Cut"             ,
 if with_subevents: words = sentances
 text = clip.tokenize([template + w for w in words]).to(device)
 
+parser = argparse.ArgumentParser(description='Youhome Clip Adaptation module')
+parser.add_argument('--data_dir', '-d', type=str, default='/home/abhi/research/SmartHome/Data/image_folder_yolo_cropped_data',
+                    help='path to the dataset directory')
+# parser.add_argument('--arch', metavar='ARCH', default='resnet', help='Choose a model')
+# parser.add_argument('--save', '-s', action='store_true', help='save the model')
+# parser.add_argument('--save_folder', type=str, default='./save/',
+#                     help='Folder to save checkpoints and log.')
+# parser.add_argument('--epochs', '-e', type=int, default=200, help='Number of epochs to train')
+# parser.add_argument('--batch_size', '-b', type=int, default=128, help='Batch size')
+# parser.add_argument('--learning_rate', '-lr', type=float, default=0.1, help='Learning rate')
+parser.add_argument('--decay', type=float, default=1e-5, help='Weight decay')
+parser.add_argument('--num_classes', type=int, default=29, help='Number of classes')
+# parser.add_argument('--gtarget', '-g', type=float, default=0.0)
+# parser.add_argument('--finetune', '-f', action='store_true', help='finetune the model')
+# parser.add_argument('--test', '-t', action='store_true', help='test only')
+# parser.add_argument('--resume', '-r', type=str, default=None,
+#                     help='path of the model checkpoint for resuming training')
 
-class YouHomeDataset(torch.utils.data.Dataset):
-    """
-   using help from : https://medium.com/analytics-vidhya/creating-a-custom-dataset-and-dataloader-in-pytorch-76f210a1df5d
-    """
-    def __init__(self,base_dir,transforms=None):
-        self.transforms = transforms
-        #extract just gt labels
-        base = base_dir
-        labels_text = gt_labels
-        if not with_subevents:
-            new_list = []
-            for f in labels_text:
-                event=f.split(".")[0]
-                if event not in new_list:
-                    new_list.append(event)
-            labels_text = new_list
-        self.debug_labels_text = np.array(labels_text) #for debugging outside of this
+# parser.add_argument('--which_gpus', '-gpu', type=str, default='0', help='which gpus to use')
+args = parser.parse_args()
 
-        # currently length is 12
-        assert len(labels_text)==len(words), f"number of ground truth labels {len(labels_text)} need to equal number of predicted labels{len(words)}"
+assert(args.num_classes== (len(gt_labels) if with_subevents else len(words))) #can delete later, just for rn, in case i forget to change it when running
 
-        #now extract test images from files
-        self.test_imgs = []
-        self.test_gt = []
-        for p in os.listdir(base):
-            for opt in os.listdir(os.path.join(base,p)):
-                vids = os.listdir(os.path.join(base,p,opt))
-                for v in vids:
-                    if v.split("_")[-1]=='frames':
-                        frames = os.listdir(os.path.join(base,p,opt,v))
-                        if all_frames:
-                            #add all the frames of the video (with action labels) to dataset
-                            for ind,take_frame in enumerate(frames):
-                                if ind%25!=0: continue #take 1 every 25 frames (about 16 frames per video)
-                                self.test_imgs.append(os.path.join(base,p,opt,v,take_frame))
-                                if with_subevents: 
-                                    self.test_gt.append(labels_text.index(opt))
-                                else: 
-                                    self.test_gt.append(labels_text.index(opt.split('.')[0]))
-                        else:
-                            #currently let's try taking just the middle frame from the video
-                            take_frame = len(frames)//2
-                            self.test_imgs.append(os.path.join(base,p,opt,v,frames[take_frame]))
-                            if with_subevents: 
-                                self.test_gt.append(labels_text.index(opt))
-                            else: 
-                                self.test_gt.append(labels_text.index(opt.split('.')[0]))
+def load_dataset():
+    traindir = os.path.join(args.data_dir, 'train')
+    valdir = os.path.join(args.data_dir, 'val')
+    normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                     std=[0.229, 0.224, 0.225])
+    crop_scale = 0.08
+    lighting_param = 0.1
+    train_transforms = transforms.Compose([
+        transforms.RandomResizedCrop(224, scale=(crop_scale, 1.0)),
 
-        print("number of images",len(self.test_gt))
+        # util.Lighting(lighting_param),
+        transforms.RandomHorizontalFlip(),
+        transforms.RandomRotation(10),
+        transforms.ToTensor()
+        # transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.25, 0.25, 0.25])
+        # normalize,
+    ])
 
-    def __len__(self):
-        return len(self.test_gt)
+    train_dataset = torchvision.datasets.ImageFolder(
+        traindir,
+        transform=train_transforms
+    )
+    train_dataset_small = torch.utils.data.Subset(
+        train_dataset, 
+        random.sample(range(len(train_dataset)), k=int(len(train_dataset)/20)))
 
-    def __getitem__(self,idx):
-        img_file = self.test_imgs[idx] #NOTE: I wonder if this slows it down, bc we processing images as we get 
-                                        # items as opposed to reading all the images in the beginning init
-        image = Image.open(img_file)
-        if self.transforms: #https://pytorch.org/tutorials/beginner/basics/data_tutorial.html
-            image = self.transforms(image)
-            image = preprocess(transforms.ToPILImage()(image)).to(device) #clips preprocess wants PIL image
-        else:
-            image = preprocess(image).to(device)
-        return (image,img_file),self.test_gt[idx] #passing img_file for debugging
+    trainloader = torch.utils.data.DataLoader(
+        train_dataset_small, batch_size=batch_size, shuffle=True,
+        num_workers=max(8, 2*torch.cuda.device_count()), 
+        pin_memory=True, drop_last=False
+    )
+
+    val_dataset = torchvision.datasets.ImageFolder(valdir, transforms.Compose([
+            transforms.Resize(256),
+            transforms.CenterCrop(224),
+            transforms.ToTensor()
+            # normalize
+        ]))
+    val_dataset_small = torch.utils.data.Subset(
+        val_dataset,
+        random.sample(range(len(val_dataset)), k=int(len(val_dataset)/10)))
+
+    valloader = torch.utils.data.DataLoader(
+        val_dataset_small,
+        batch_size=batch_size, shuffle=False,
+        num_workers=max(8, 2*torch.cuda.device_count()), 
+        pin_memory=True, drop_last=False
+    )
+
+    return trainloader, valloader
+
 
 
 
@@ -216,11 +230,8 @@ if use_transforms:
 else:
     train_transforms = None
 
-dataset_train = YouHomeDataset("/home/abhi/research/SmartHome/Data/youhome_mp4_data/train_split_v2",transforms=train_transforms)
-dataset_test = YouHomeDataset("/home/abhi/research/SmartHome/Data/youhome_mp4_data/test_split_v2")
-dataloader_train = torch.utils.data.DataLoader(dataset_train, batch_size=batch_size, shuffle=True)
-dataloader_test = torch.utils.data.DataLoader(dataset_test, batch_size=batch_size, shuffle=True)
 
+dataloader_train, dataloader_test = load_dataset()
 # maybe later
 # class EventModel(nn.Module):
 #     def __init__(self):
@@ -235,31 +246,31 @@ dataloader_test = torch.utils.data.DataLoader(dataset_test, batch_size=batch_siz
 #https://medium.com/nerd-for-tech/image-classification-using-transfer-learning-pytorch-resnet18-32b642148cbe
 
 #resnet version
-# adapt_model = torchvision.models.resnet18(weights=None) #randomly initialized weights
-# num_features = adapt_model.fc.in_features #need to change output to match our number of classes
-# adapt_model.fc = nn.Linear(num_features, len(gt_labels))
-# adapt_model.conv1 = nn.Sequential(nn.Linear(512,32*32*3),nn.Unflatten(1,(3,32,32)),adapt_model.conv1)
+adapt_model = torchvision.models.resnet18(weights=None) #randomly initialized weights
+num_features = adapt_model.fc.in_features #need to change output to match our number of classes
+adapt_model.fc = nn.Linear(num_features, len(gt_labels))
+adapt_model.conv1 = nn.Sequential(nn.Linear(512,32*32*3),nn.Unflatten(1,(3,32,32)),adapt_model.conv1)
 
 
 #MLP Version:
-if combine_text:
-    adapt_model = torchvision.ops.MLP(len(dataset_test.debug_labels_text),[256,128,len(dataset_test.debug_labels_text)]) #because clip's model.encode(0 results in batch_sizex512)
-else:
-    adapt_model = torchvision.ops.MLP(512,[256,128,len(dataset_test.debug_labels_text)]) #because clip's model.encode(0 results in batch_sizex512)
+# if combine_text:
+#     adapt_model = torchvision.ops.MLP(args.num_classes,[256,128,args.num_classes]) #because clip's model.encode(0 results in batch_sizex512)
+# else:
+#     adapt_model = torchvision.ops.MLP(512,[256,128,args.num_classes]) #because clip's model.encode(0 results in batch_sizex512)
 
 
 adapt_model = adapt_model.to(device)
 criterion =  nn.CrossEntropyLoss()
-optimizer = optim.Adam(adapt_model.parameters(),lr=learning_rate, weight_decay=1e-5)#optim.SGD(adapt_model.parameters(),lr=learning_rate, momentum=.9) # lr=.001
+optimizer = optim.Adam(adapt_model.parameters(),lr=learning_rate, weight_decay=args.decay)#optim.SGD(adapt_model.parameters(),lr=learning_rate, momentum=.9) # lr=.001
 scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=25)
 
 start_time = time.time() #(for showing time)
-if train:
+if train and use_adaptation_module:
     for epoch in range(num_epochs):
         adapt_model.train()
         running_loss = 0.
         running_corrects = 0
-        for ind, ((images,files),labels) in tqdm(enumerate(dataloader_train),total=len(dataloader_train)):
+        for ind, (images,labels) in tqdm(enumerate(dataloader_train),total=len(dataloader_train)):
             image_features = model.encode_image(images.to(device))
             text_features = model.encode_text(text.to(device))
             labels = labels.to(device)
@@ -288,8 +299,8 @@ if train:
                 # name, value, iteration
                 train_writer.add_scalar("loss",loss.item(),ind+epoch*len((dataloader_train)))
 
-        epoch_loss = running_loss / len(dataset_train)
-        epoch_acc = running_corrects / len(dataset_train) * 100
+        epoch_loss = running_loss / len(dataloader_train.dataset)
+        epoch_acc = running_corrects / len(dataloader_train.dataset) * 100
         print('[Train #{}] Loss: {:.4f} Acc: {:.4f}% Time: {:.4f}s'.format(epoch, epoch_loss, epoch_acc, time.time() -start_time))
         train_writer.add_scalar("epoch_loss",epoch_loss,epoch)
         train_writer.add_scalar("epoch_acc",epoch_acc,epoch)
@@ -306,9 +317,9 @@ if train:
             with torch.no_grad():
                 running_loss = 0.
                 running_corrects = 0
-                for ind, ((images,files),labels) in tqdm(enumerate(dataloader_test),total=len(dataloader_test)):
+                for ind, (images,labels) in tqdm(enumerate(dataloader_test),total=len(dataloader_test)):
                     # print(type(images)) #it's a torch tensor
-                    image_features = model.encode_image(images)
+                    image_features = model.encode_image(images.to(device))
                     text_features = model.encode_text(text)
                     labels = labels.to(device)
                     if combine_text:
@@ -323,8 +334,8 @@ if train:
                     loss = criterion(outputs, labels)
                     running_loss += loss.item() * images.size(0)
                     running_corrects += torch.sum(preds == labels.data)
-                epoch_loss = running_loss / len(dataset_test)
-                epoch_acc = running_corrects / len(dataset_train) * 100.
+                epoch_loss = running_loss / len(dataloader_test.dataset)
+                epoch_acc = running_corrects / len(dataloader_test.dataset) * 100.
                 print('[Test #{}] Loss: {:.4f} Acc: {:.4f}% Time: {:.4f}s'.format(epoch, epoch_loss, epoch_acc, time.time()- start_time))
                 val_writer.add_scalar("epoch_loss",epoch_loss,epoch)
                 val_writer.add_scalar("epoch_acc",epoch_acc,epoch)
@@ -348,32 +359,33 @@ with torch.no_grad():
     running_corrects = 0
     running_labels = np.array([])
     running_preds = np.array([])
-    for ind, ((images,files),labels) in tqdm(enumerate(dataloader_test),total=len(dataloader_test)):
+    for ind, (images,labels) in tqdm(enumerate(dataloader_test),total=len(dataloader_test)):
         # print(type(images)) #it's a torch tensor
-        image_features = model.encode_image(images)
+        image_features = model.encode_image(images.to(device))
         text_features = model.encode_text(text)
         labels = labels.to(device)
-        if combine_text:
+        if combine_text or not use_adaptation_module:
             image_features_normed = image_features/image_features.norm(dim=-1, keepdim=True)
             text_features_normed = text_features/text_features.norm(dim=-1, keepdim=True)
-            image_features = image_features_normed @ text_features_normed.T
+            if combine_text:
+                image_features = image_features_normed @ text_features_normed.T
 
         if DEBUG: print("image_features",image_features.shape,"text_features",text_features.shape)
 
-        outputs = adapt_model(image_features.float())
+        outputs = adapt_model(image_features.float()) if use_adaptation_module else (100.0 * image_features @ text_features.T).softmax(dim=-1)
         _, preds = torch.max(outputs, 1)
         running_preds = np.concatenate((running_preds,preds.cpu().numpy()))
         running_labels = np.concatenate((running_labels,labels.cpu().numpy()))
         loss = criterion(outputs, labels)
         running_loss += loss.item() * images.size(0)
         running_corrects += torch.sum(preds == labels.data)
-    epoch_loss = running_loss / len(dataset_test)
-    epoch_acc = running_corrects / len(dataset_train) * 100.
-    print('FINAL [Test #{}] Loss: {:.4f} Acc: {:.4f}% Time: {:.4f}s'.format(epoch, epoch_loss, epoch_acc, time.time()- start_time))
+    epoch_loss = running_loss / len(dataloader_test.dataset)
+    epoch_acc = running_corrects / len(dataloader_test.dataset) * 100.
+    # print('FINAL [Test #{}] Loss: {:.4f} Acc: {:.4f}% Time: {:.4f}s'.format(epoch, epoch_loss, epoch_acc, time.time()- start_time))
 
 if DEBUG: print("running_preds",running_preds.shape, "running_labels",running_labels.shape)
 #https://stackoverflow.com/questions/65618137/confusion-matrix-for-multiple-classes-in-python
-cm = metrics.confusion_matrix(running_labels,running_preds,labels=list(range(len(dataset_test.debug_labels_text))))
+cm = metrics.confusion_matrix(running_labels,running_preds,labels=list(range(args.num_classes)))
 # Plot confusion matrix in a beautiful manner
 fig = plt.figure(figsize=(30,30))
 ax= plt.subplot()
@@ -382,10 +394,10 @@ sns.heatmap(cm, annot=True, ax = ax, fmt = 'g'); #annot=True to annotate cells
 ax.set_xlabel('Predicted', fontsize=20)
 ax.xaxis.set_label_position('bottom')
 plt.xticks(rotation=90)
-ax.xaxis.set_ticklabels(dataset_test.debug_labels_text, fontsize = 10)
+ax.xaxis.set_ticklabels(np.array(gt_labels if with_subevents else words) , fontsize = 10)
 ax.xaxis.tick_bottom()
 ax.set_ylabel('True', fontsize=20)
-ax.yaxis.set_ticklabels(dataset_test.debug_labels_text, fontsize = 10)
+ax.yaxis.set_ticklabels(np.array(gt_labels if with_subevents else words), fontsize = 10)
 plt.yticks(rotation=0)
 plt.title(run_name+f"_Acc:{epoch_acc}", fontsize=20)
 plt.savefig('CMs/'+run_name+'.png')
@@ -417,4 +429,9 @@ To Ask Neo:
 - 31 events? i'm counting 29 in all the folders
 - what is binary_react dataset?
 - was it tested on Toyota dataset?
+
+Ask Junhao?
+- in load dataset what is the random subset for? why not use all the data?
+- what are the bumps every 25 epochs in your train graph?
+- train-val split?
 """
