@@ -37,12 +37,12 @@ train = True
 learning_rate = .001 #1e-5 #.001
 use_transforms = True
 combine_text = False
-use_adaptation_module = False
+use_adaptation_module = True
 DEBUG = 0 #note debug only runs one iteration
 if DEBUG:
     run_name='debugging'
 else:
-    run_name=f"CLIPZS_with_subevents_{with_subevents}_all_frames_{all_frames}_lr_{learning_rate}_epochs_{num_epochs}_YOLOprecropped" #all_frames_with_subevents"
+    run_name=f"MLP_with_subevents_{with_subevents}_all_frames_{all_frames}_lr_{learning_rate}_epochs_{num_epochs}_YOLOprecropped" #all_frames_with_subevents"
     # run_name = "solo_resnet18"
 print("Running:", run_name)
 
@@ -245,18 +245,18 @@ dataloader_train, dataloader_test = load_dataset()
 #training adaption module
 #https://medium.com/nerd-for-tech/image-classification-using-transfer-learning-pytorch-resnet18-32b642148cbe
 
-#resnet version
-adapt_model = torchvision.models.resnet18(weights=None) #randomly initialized weights
-num_features = adapt_model.fc.in_features #need to change output to match our number of classes
-adapt_model.fc = nn.Linear(num_features, len(gt_labels))
-adapt_model.conv1 = nn.Sequential(nn.Linear(512,32*32*3),nn.Unflatten(1,(3,32,32)),adapt_model.conv1)
+# #resnet version
+# adapt_model = torchvision.models.resnet18(weights=None) #randomly initialized weights
+# num_features = adapt_model.fc.in_features #need to change output to match our number of classes
+# adapt_model.fc = nn.Linear(num_features, len(gt_labels))
+# adapt_model.conv1 = nn.Sequential(nn.Linear(512,32*32*3),nn.Unflatten(1,(3,32,32)),adapt_model.conv1)
 
 
-#MLP Version:
-# if combine_text:
-#     adapt_model = torchvision.ops.MLP(args.num_classes,[256,128,args.num_classes]) #because clip's model.encode(0 results in batch_sizex512)
-# else:
-#     adapt_model = torchvision.ops.MLP(512,[256,128,args.num_classes]) #because clip's model.encode(0 results in batch_sizex512)
+# MLP Version:
+if combine_text:
+    adapt_model = torchvision.ops.MLP(args.num_classes,[256,128,args.num_classes]) #because clip's model.encode(0 results in batch_sizex512)
+else:
+    adapt_model = torchvision.ops.MLP(512,[256,128,args.num_classes]) #because clip's model.encode(0 results in batch_sizex512)
 
 
 adapt_model = adapt_model.to(device)
