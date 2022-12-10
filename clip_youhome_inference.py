@@ -1,3 +1,11 @@
+# Commands to Run:
+# python clip_youhome_inference.py --data_dir /home/abhi/research/SmartHome/Data/full_data --num_classes 31 | tee log_outs/2.txt
+
+
+
+
+
+
 #for baseline clip inference and analysis
 import torch
 import clip
@@ -27,12 +35,11 @@ import random
 import argparse
 
 
-
 #Parameters to set each fun
 with_subevents = True
 all_frames = False
-batch_size = 64
-num_epochs = 200
+batch_size = 32
+num_epochs = 400
 train = True
 learning_rate = .001 #1e-5 #.001
 use_transforms = True
@@ -42,7 +49,7 @@ DEBUG = 0 #note debug only runs one iteration
 if DEBUG:
     run_name='debugging'
 else:
-    run_name=f"MLP_with_subevents_{with_subevents}_all_frames_{all_frames}_lr_{learning_rate}_epochs_{num_epochs}_YOLOprecropped" #all_frames_with_subevents"
+    run_name=f"MLP_with_subevents_{with_subevents}_all_frames_{all_frames}_lr_{learning_rate}_epochs_{num_epochs}_newYouHomeData" #all_frames_with_subevents"
     # run_name = "solo_resnet18"
 print("Running:", run_name)
 
@@ -55,6 +62,8 @@ val_writer = SummaryWriter(log_dir / 'val')
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 model, preprocess = clip.load("ViT-B/32", device=device)
+#see https://github.com/openai/CLIP/blob/main/clip/clip.py
+# model, preprocess = clip.load("ViT-B/16", device=device)
 # template = "A picture of a person " #this shows minimal diference in results
 # class dummy(nn.Module):
 #     def forward(self,x):
@@ -135,7 +144,9 @@ if with_subevents: words = sentances
 text = clip.tokenize([template + w for w in words]).to(device)
 
 parser = argparse.ArgumentParser(description='Youhome Clip Adaptation module')
-parser.add_argument('--data_dir', '-d', type=str, default='/home/abhi/research/SmartHome/Data/image_folder_yolo_cropped_data',
+
+#new dataset --data_dir /home/abhi/research/SmartHome/Data/imgdata4event_2021_full_cropped
+parser.add_argument('--data_dir', '-d', type=str, default='/home/abhi/research/SmartHome/Data/full_data',
                     help='path to the dataset directory')
 # parser.add_argument('--arch', metavar='ARCH', default='resnet', help='Choose a model')
 # parser.add_argument('--save', '-s', action='store_true', help='save the model')
@@ -155,6 +166,39 @@ parser.add_argument('--num_classes', type=int, default=29, help='Number of class
 # parser.add_argument('--which_gpus', '-gpu', type=str, default='0', help='which gpus to use')
 args = parser.parse_args()
 
+if args.num_classes==31:
+    gt_labels = ["Cook.Cut"             ,
+            "Cook.Usemicrowave"     ,
+            "Cook.Useoven"          ,
+            "Cook.Usestove"         ,
+            "Drink.Frombottle"      ,
+            "Drink.Fromcup"         ,
+            "Eat.Snack"             ,
+            "Eat.Useutensil"        ,
+            "Enter"                 ,
+            "Exercise"              ,
+            "Getup"                 ,
+            "Lay.Onbed"             ,
+            "Leave"                 ,
+            "Nap"                   ,
+            "Play.Boardgame"        ,
+            "Read"                  ,
+            "Use.Coffeemachine"     ,
+            "Use.Computer"          ,
+            "Use.Dishwasher"        ,
+            "Use.Gamecontroller"    ,
+            "Use.Kettle"            ,
+            "Use.Mop"               ,
+            "Use.Phone"             ,
+            "Use.Refrig"            ,
+            "Use.Shelf"             ,
+            "Use.Sink"              ,
+            "Use.Switch"            ,
+            "Use.Tablet"            ,
+            "Use.Vaccum"            ,
+            "Watch.TV"              ,
+            "Write"                             
+            ]
 assert(args.num_classes== (len(gt_labels) if with_subevents else len(words))) #can delete later, just for rn, in case i forget to change it when running
 
 def load_dataset():
@@ -252,7 +296,7 @@ dataloader_train, dataloader_test = load_dataset()
 # adapt_model.conv1 = nn.Sequential(nn.Linear(512,32*32*3),nn.Unflatten(1,(3,32,32)),adapt_model.conv1)
 
 
-# MLP Version:
+# # MLP Version:
 if combine_text:
     adapt_model = torchvision.ops.MLP(args.num_classes,[256,128,args.num_classes]) #because clip's model.encode(0 results in batch_sizex512)
 else:
@@ -432,6 +476,18 @@ To Ask Neo:
 
 Ask Junhao?
 - in load dataset what is the random subset for? why not use all the data?
-- what are the bumps every 25 epochs in your train graph?
-- train-val split?
+- what are the bumps every 25 epochs in your train graph? - learning rate scheduler, every 25 epochs turn down learning rate.
+- train-val split? - 98%
+- - cross camera challenge, 3 cameras in one room recording the same activity at the same time but not doing the 
+- - overfitting in our case may not be a problem, because people in the same home will look around the same and act about the same as well
+- - paper: can you infer this action based on where the user is sitting -> context dependent
+- - take two shots on the same activity and take the first as training and validation, understand generilizability of the model
+
+
+what to aim for according to Junhao, train on other data as well. 
+- imagine a use case, how do you apply this foundation model to. If we have thousands of households.  if we can use 
+our data to create 3-5 house holds in 30 activities , in 5 homes, each home would do 7-8 activites
+use one model to serve all 5 homes - make this scalable
+
+generalizability - specific part of data set to a 
 """

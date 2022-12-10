@@ -17,14 +17,18 @@ import seaborn as sns
 import torch.nn as nn
 import torch.optim as optim
 import torchvision
+from torchvision import transforms
+import random
 
 from sklearn.linear_model import LogisticRegression
+# import clip_youhome_inference.load_dataset,clip_youhome_inference.args
 
 
 #Parameters to set each fun
 with_subevents = True
 all_frames = True
 top5 = False
+batch_size = 256
 DEBUG = 0 #note debug only runs one iteration
 if DEBUG:
     run_name='debugging'
@@ -105,62 +109,56 @@ if with_subevents: words = sentances
 text = clip.tokenize([template + w for w in words]).to(device)
 
 
-class YouHomeDataset(torch.utils.data.Dataset):
-    """
-   using help from : https://medium.com/analytics-vidhya/creating-a-custom-dataset-and-dataloader-in-pytorch-76f210a1df5d
-    """
-    def __init__(self,base_dir):
-        #extract just gt labels
-        base = base_dir
-        labels_text = gt_labels
-        if not with_subevents:
-            new_list = []
-            for f in labels_text:
-                event=f.split(".")[0]
-                if event not in new_list:
-                    new_list.append(event)
-            labels_text = new_list
-        self.debug_labels_text = np.array(labels_text) #for debugging outside of this
+def load_dataset():
+    traindir = os.path.join('/home/abhi/research/SmartHome/Data/image_folder_yolo_cropped_data', 'train')
+    valdir = os.path.join('/home/abhi/research/SmartHome/Data/image_folder_yolo_cropped_data', 'val')
+    normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                     std=[0.229, 0.224, 0.225])
+    crop_scale = 0.08
+    lighting_param = 0.1
+    train_transforms = transforms.Compose([
+        transforms.RandomResizedCrop(224, scale=(crop_scale, 1.0)),
 
-        # currently length is 12
-        assert len(labels_text)==len(words), f"number of ground truth labels {len(labels_text)} need to equal number of predicted labels{len(words)}"
+        # util.Lighting(lighting_param),
+        transforms.RandomHorizontalFlip(),
+        transforms.RandomRotation(10),
+        transforms.ToTensor()
+        # transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.25, 0.25, 0.25])
+        # normalize,
+    ])
 
-        #now extract test images from files
-        self.test_imgs = []
-        self.test_gt = []
-        for p in os.listdir(base):
-            for opt in os.listdir(os.path.join(base,p)):
-                vids = os.listdir(os.path.join(base,p,opt))
-                for v in vids:
-                    if v.split("_")[-1]=='frames':
-                        frames = os.listdir(os.path.join(base,p,opt,v))
-                        if all_frames:
-                            #add all the frames of the video (with action labels) to dataset
-                            for take_frame in frames:
-                                self.test_imgs.append(os.path.join(base,p,opt,v,take_frame))
-                                if with_subevents: 
-                                    self.test_gt.append(labels_text.index(opt))
-                                else: 
-                                    self.test_gt.append(labels_text.index(opt.split('.')[0]))
-                        else:
-                            #currently let's try taking just the middle frame from the video
-                            take_frame = len(frames)//2
-                            self.test_imgs.append(os.path.join(base,p,opt,v,frames[take_frame]))
-                            if with_subevents: 
-                                self.test_gt.append(labels_text.index(opt))
-                            else: 
-                                self.test_gt.append(labels_text.index(opt.split('.')[0]))
+    train_dataset = torchvision.datasets.ImageFolder(
+        traindir,
+        transform=train_transforms
+    )
+    train_dataset_small = torch.utils.data.Subset(
+        train_dataset, 
+        random.sample(range(len(train_dataset)), k=int(len(train_dataset)/20)))
 
-        print("number test images",len(self.test_gt))
+    trainloader = torch.utils.data.DataLoader(
+        train_dataset_small, batch_size=batch_size, shuffle=True,
+        num_workers=max(8, 2*torch.cuda.device_count()), 
+        pin_memory=True, drop_last=False
+    )
 
-    def __len__(self):
-        return len(self.test_gt)
+    val_dataset = torchvision.datasets.ImageFolder(valdir, transforms.Compose([
+            transforms.Resize(256),
+            transforms.CenterCrop(224),
+            transforms.ToTensor()
+            # normalize
+        ]))
+    val_dataset_small = torch.utils.data.Subset(
+        val_dataset,
+        random.sample(range(len(val_dataset)), k=int(len(val_dataset)/10)))
 
-    def __getitem__(self,idx):
-        img_file = self.test_imgs[idx] #NOTE: I wonder if this slows it down, bc we processing images as we get 
-                                        # items as opposed to reading all the images in the beginning init
-        image = preprocess(Image.open(img_file)).to(device)
-        return (image,img_file),self.test_gt[idx] #passing img_file for debugging
+    valloader = torch.utils.data.DataLoader(
+        val_dataset_small,
+        batch_size=batch_size, shuffle=False,
+        num_workers=max(8, 2*torch.cuda.device_count()), 
+        pin_memory=True, drop_last=False
+    )
+
+    return trainloader, valloader
 
 
 
@@ -168,8 +166,9 @@ class YouHomeDataset(torch.utils.data.Dataset):
 correct_count = 0
 predictions=[]
 ground_truths =[]
-dataset_train = YouHomeDataset("/home/abhi/research/SmartHome/Data/youhome_mp4_data/train_split")
-dataset_test = YouHomeDataset("/home/abhi/research/SmartHome/Data/youhome_mp4_data/test_split")
+train_loader, test_loader = load_dataset()
+dataset_train = train_loader.dataset #YouHomeDataset("/home/abhi/research/SmartHome/Data/youhome_mp4_data/train_split")
+dataset_test = test_loader.dataset #YouHomeDataset("/home/abhi/research/SmartHome/Data/youhome_mp4_data/test_split")
 # dataloader = torch.utils.data.DataLoader(dataset, batch_size=32, shuffle=False)
 
 
@@ -178,7 +177,7 @@ def get_features(dataset):
     all_labels = []
     
     with torch.no_grad():
-        for (images,files), labels in tqdm(torch.utils.data.DataLoader(dataset, batch_size=100)):
+        for images, labels in tqdm(torch.utils.data.DataLoader(dataset, batch_size=batch_size)):
             features = model.encode_image(images.to(device))
 
             all_features.append(features)
@@ -192,7 +191,7 @@ test_features, test_labels = get_features(dataset_test)
 
 #sweep cs to find best performance
 vals = []
-cs = [.19]#np.arange(0,1.01,.001)
+cs = np.arange(0,1.01,.01) #[.19]#
 for c in cs:
     # Perform logistic regression
     classifier = LogisticRegression(random_state=0,C=c, max_iter=1000, verbose=0) #C=0.316, max_iter=1000, verbose=0)

@@ -1,0 +1,7 @@
+Running: MLP_with_subevents_True_all_frames_False_lr_0.001_epochs_400_newYouHomeData
+[Train #0] Loss: 2.4111 Acc: 24.7258% Time: 42.8884s
+Intermediate model save as  models/MLP_with_subevents_True_all_frames_False_lr_0.001_epochs_400_newYouHomeData.pth
+VALIDATING MODEL
+[Test #0] Loss: 1.6332 Acc: 45.6625% Time: 56.3051s
+[Train #1] Loss: 2.0699 Acc: 33.3891% Time: 96.5188s
+Intermediate model save as  models/MLP_with_subevents_True_all_frames_False_lr_0.001_epochs_400_newYouHomeData.pth
