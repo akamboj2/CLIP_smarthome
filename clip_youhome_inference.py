@@ -39,7 +39,7 @@ import argparse
 with_subevents = True
 all_frames = False
 batch_size = 32
-num_epochs = 400
+num_epochs = 200
 train = True
 learning_rate = .001 #1e-5 #.001
 use_transforms = True
@@ -49,7 +49,7 @@ DEBUG = 0 #note debug only runs one iteration
 if DEBUG:
     run_name='debugging'
 else:
-    run_name=f"MLP_with_subevents_{with_subevents}_all_frames_{all_frames}_lr_{learning_rate}_epochs_{num_epochs}_newYouHomeData" #all_frames_with_subevents"
+    run_name=f"resnet18_with_subevents_{with_subevents}_all_frames_{all_frames}_lr_{learning_rate}_epochs_{num_epochs}_person_generalize" #all_frames_with_subevents"
     # run_name = "solo_resnet18"
 print("Running:", run_name)
 
@@ -146,6 +146,7 @@ text = clip.tokenize([template + w for w in words]).to(device)
 parser = argparse.ArgumentParser(description='Youhome Clip Adaptation module')
 
 #new dataset --data_dir /home/abhi/research/SmartHome/Data/imgdata4event_2021_full_cropped
+# generalization dataset --data_dir /home/abhi/research/SmartHome/Data/person_generalize
 parser.add_argument('--data_dir', '-d', type=str, default='/home/abhi/research/SmartHome/Data/full_data',
                     help='path to the dataset directory')
 # parser.add_argument('--arch', metavar='ARCH', default='resnet', help='Choose a model')
