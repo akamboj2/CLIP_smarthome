@@ -1,7 +1,7 @@
 # Commands to Run:
 # python clip_youhome_inference.py --data_dir /home/abhi/research/SmartHome/Data/full_data --num_classes 31 | tee log_outs/2.txt
-
-
+#new dataset --data_dir /home/abhi/research/SmartHome/Data/imgdata4event_2021_full_cropped
+# generalization dataset --data_dir /home/abhi/research/SmartHome/Data/person_generalize
 
 
 
@@ -30,143 +30,39 @@ from torchvision import transforms
 
 from tensorboardX import SummaryWriter
 from pathlib import Path
-
 import random
 import argparse
 
 
-#Parameters to set each fun
-with_subevents = True
-all_frames = False
-batch_size = 32
-num_epochs = 200
-train = True
-learning_rate = .001 #1e-5 #.001
-use_transforms = True
-combine_text = False
-use_adaptation_module = True
+#Parameters to set 
 DEBUG = 0 #note debug only runs one iteration
+parser = argparse.ArgumentParser(description='Youhome Clip Adaptation module')
+parser.add_argument('--data_dir', '-d', type=str, default='/home/abhi/research/SmartHome/Data/full_data',
+                    help='path to the dataset directory')
+parser.add_argument('--num_epochs', '-e', type=int, default=200, help='Number of epochs to train')
+parser.add_argument('--batch_size', '-b', type=int, default=32, help='Batch size')
+parser.add_argument('--learning_rate', '-lr', type=float, default=0.001, help='Learning rate')
+parser.add_argument('--decay', type=float, default=1e-5, help='Weight decay')
+parser.add_argument('--num_classes', type=int, default=31, help='Number of classes')
+parser.add_argument('--train',type=bool, default=True, help="Set to True when training, false when testing")
+parser.add_argument('--with_subevents',type=bool, default=True, help="Set to True when detecting subevents as well")
+parser.add_argument('--combine_text',type=bool, default=False, help="Set to True when combining Text with images as input from CLIP's output to adaptation module")
+parser.add_argument('--use_adaptation_module',type=bool, default=True, help="Set to True when when using adaptation module")
+parser.add_argument('--adapt_module',type=str, default='MLP', help="type of adaptation module to use - defaults to resnet")
+
+args = parser.parse_args()
+
+#set run name
 if DEBUG:
     run_name='debugging'
 else:
-    run_name=f"resnet18_with_subevents_{with_subevents}_all_frames_{all_frames}_lr_{learning_rate}_epochs_{num_epochs}_person_generalize" #all_frames_with_subevents"
-    # run_name = "solo_resnet18"
+    run_name=f"test_with_subevents_{args.with_subevents}_lr_{args.learning_rate}_epochs_{args.num_epochs}_person_generalize" 
 print("Running:", run_name)
 
-#for logging loss and accuracy
-log_dir = Path('log_dir') / run_name 
-log_dir.mkdir(parents=True, exist_ok=True)
-train_writer = SummaryWriter(log_dir/'train')
-val_writer = SummaryWriter(log_dir / 'val')
 
-device = "cuda" if torch.cuda.is_available() else "cpu"
-
-model, preprocess = clip.load("ViT-B/32", device=device)
-#see https://github.com/openai/CLIP/blob/main/clip/clip.py
-# model, preprocess = clip.load("ViT-B/16", device=device)
-# template = "A picture of a person " #this shows minimal diference in results
-# class dummy(nn.Module):
-#     def forward(self,x):
-#         return x
-#     def encode_image(self,image):
-#         return image
-#     def encode_text(self,text):
-#         return text
-# model, preprocess = dummy(),lambda x: transforms.ToTensor()(x)
-
-
-
+# Setup labels as captions
 template = "A person is "
-words = ["cooking","drinking","eating","exercising","getting up", "laying", "napping", "playing","reading","using something","watching TV", "writing"]
-
-#needs to be parallel arrays (not dict) to maintain order (traversing dict does not maintain order...)
-sentances = ["cooking by cutting something.",
-            "cooking using a microwave",
-            "cooking using an oven",
-            "cooking using a stove",
-            "drinking from a bottle",
-            "drinking from a cup",
-            "eating a snack",
-            "eating using a utensil",
-            "exercising",
-            "getting up",
-            "laying on a bed",
-            "napping",
-            "playing a boardgame",
-            "reading",
-            "using a coffee machine",
-            "using a computer",
-            "using a dishwasher",
-            "using a gname controller",
-            "using a kettle",
-            "using a mop",
-            "using a phone",
-            "using a refrigerator",
-            "using a shelf",
-            "using a sink",
-            "using a ninetendo switch",
-            "using a tablet",
-            "using a vaccum",
-            "watching TV",
-            "writing"
-        ]
-gt_labels = ["Cook.Cut"             ,
-            "Cook.Usemicrowave"     ,
-            "Cook.Useoven"          ,
-            "Cook.Usestove"         ,
-            "Drink.Frombottle"      ,
-            "Drink.Fromcup"         ,
-            "Eat.Snack"             ,
-            "Eat.Useutensil"        ,
-            "Exercise"              ,
-            "Getup"                 ,
-            "Lay.Onbed"             ,
-            "Nap"                   ,
-            "Play.Boardgame"        ,
-            "Read"                  ,
-            "Use.Coffeemachine"     ,
-            "Use.Computer"          ,
-            "Use.Dishwasher"        ,
-            "Use.Gamecontroller"    ,
-            "Use.Kettle"            ,
-            "Use.Mop"               ,
-            "Use.Phone"             ,
-            "Use.Refrig"            ,
-            "Use.Shelf"             ,
-            "Use.Sink"              ,
-            "Use.Switch"            ,
-            "Use.Tablet"            ,
-            "Use.Vaccum"            ,
-            "Watch.TV"              ,
-            "Write"                             
-            ]
-if with_subevents: words = sentances
-text = clip.tokenize([template + w for w in words]).to(device)
-
-parser = argparse.ArgumentParser(description='Youhome Clip Adaptation module')
-
-#new dataset --data_dir /home/abhi/research/SmartHome/Data/imgdata4event_2021_full_cropped
-# generalization dataset --data_dir /home/abhi/research/SmartHome/Data/person_generalize
-parser.add_argument('--data_dir', '-d', type=str, default='/home/abhi/research/SmartHome/Data/full_data',
-                    help='path to the dataset directory')
-# parser.add_argument('--arch', metavar='ARCH', default='resnet', help='Choose a model')
-# parser.add_argument('--save', '-s', action='store_true', help='save the model')
-# parser.add_argument('--save_folder', type=str, default='./save/',
-#                     help='Folder to save checkpoints and log.')
-# parser.add_argument('--epochs', '-e', type=int, default=200, help='Number of epochs to train')
-# parser.add_argument('--batch_size', '-b', type=int, default=128, help='Batch size')
-# parser.add_argument('--learning_rate', '-lr', type=float, default=0.1, help='Learning rate')
-parser.add_argument('--decay', type=float, default=1e-5, help='Weight decay')
-parser.add_argument('--num_classes', type=int, default=29, help='Number of classes')
-# parser.add_argument('--gtarget', '-g', type=float, default=0.0)
-# parser.add_argument('--finetune', '-f', action='store_true', help='finetune the model')
-# parser.add_argument('--test', '-t', action='store_true', help='test only')
-# parser.add_argument('--resume', '-r', type=str, default=None,
-#                     help='path of the model checkpoint for resuming training')
-
-# parser.add_argument('--which_gpus', '-gpu', type=str, default='0', help='which gpus to use')
-args = parser.parse_args()
-
+words = ["cooking","drinking","eating","entering","exercising","getting up", "laying", "leaving","napping", "playing","reading","using something","watching TV", "writing"]
 if args.num_classes==31:
     gt_labels = ["Cook.Cut"             ,
             "Cook.Usemicrowave"     ,
@@ -198,10 +94,119 @@ if args.num_classes==31:
             "Use.Tablet"            ,
             "Use.Vaccum"            ,
             "Watch.TV"              ,
+            "Write"
+    ]                           
+    sentences = ["cooking by cutting something.",
+            "cooking using a microwave",
+            "cooking using an oven",
+            "cooking using a stove",
+            "drinking from a bottle",
+            "drinking from a cup",
+            "eating a snack",
+            "eating using a utensil",
+            "entering the room",
+            "exercising",
+            "getting up",
+            "laying on a bed",
+            "leaving the room",
+            "napping",
+            "playing a boardgame",
+            "reading",
+            "using a coffee machine",
+            "using a computer",
+            "using a dishwasher",
+            "using a gname controller",
+            "using a kettle",
+            "using a mop",
+            "using a phone",
+            "using a refrigerator",
+            "using a shelf",
+            "using a sink",
+            "using a ninetendo switch",
+            "using a tablet",
+            "using a vaccum",
+            "watching TV",
+            "writing"
+        ]
+else:
+    gt_labels = ["Cook.Cut"             ,
+            "Cook.Usemicrowave"     ,
+            "Cook.Useoven"          ,
+            "Cook.Usestove"         ,
+            "Drink.Frombottle"      ,
+            "Drink.Fromcup"         ,
+            "Eat.Snack"             ,
+            "Eat.Useutensil"        ,
+            "Exercise"              ,
+            "Getup"                 ,
+            "Lay.Onbed"             ,
+            "Nap"                   ,
+            "Play.Boardgame"        ,
+            "Read"                  ,
+            "Use.Coffeemachine"     ,
+            "Use.Computer"          ,
+            "Use.Dishwasher"        ,
+            "Use.Gamecontroller"    ,
+            "Use.Kettle"            ,
+            "Use.Mop"               ,
+            "Use.Phone"             ,
+            "Use.Refrig"            ,
+            "Use.Shelf"             ,
+            "Use.Sink"              ,
+            "Use.Switch"            ,
+            "Use.Tablet"            ,
+            "Use.Vaccum"            ,
+            "Watch.TV"              ,
             "Write"                             
             ]
-assert(args.num_classes== (len(gt_labels) if with_subevents else len(words))) #can delete later, just for rn, in case i forget to change it when running
+    sentences = ["cooking by cutting something",
+        "cooking using a microwave",
+        "cooking using an oven",
+        "cooking using a stove",
+        "drinking from a bottle",
+        "drinking from a cup",
+        "eating a snack",
+        "eating using a utensil",
+        "entering the room",
+        "exercising",
+        "getting up",
+        "laying on a bed",
+        "leaving the room",
+        "napping",
+        "playing a boardgame",
+        "reading",
+        "using a coffee machine",
+        "using a computer",
+        "using a dishwasher",
+        "using a gname controller",
+        "using a kettle",
+        "using a mop",
+        "using a phone",
+        "using a refrigerator",
+        "using a shelf",
+        "using a sink",
+        "using a ninetendo switch",
+        "using a tablet",
+        "using a vaccum",
+        "watching TV",
+        "writing"
+    ]
+assert args.num_classes== (len(gt_labels) if args.with_subevents else len(words)), \
+    f"expected num_classes = number of ground truth labels: {args.num_classes}  = {gt_labels}"
 
+#Log loss train and validation loss on Tensorboard
+log_dir = Path('log_dir') / run_name 
+log_dir.mkdir(parents=True, exist_ok=True)
+train_writer = SummaryWriter(log_dir/'train')
+val_writer = SummaryWriter(log_dir / 'val')
+
+#Set up pretrained CLIP model and input labels
+device = "cuda" if torch.cuda.is_available() else "cpu"
+model, preprocess = clip.load("ViT-B/32", device=device)
+if args.with_subevents: words = sentences
+text = clip.tokenize([template + w for w in words]).to(device)
+
+#function to load dataset
 def load_dataset():
     traindir = os.path.join(args.data_dir, 'train')
     valdir = os.path.join(args.data_dir, 'val')
@@ -229,7 +234,7 @@ def load_dataset():
         random.sample(range(len(train_dataset)), k=int(len(train_dataset)/20)))
 
     trainloader = torch.utils.data.DataLoader(
-        train_dataset_small, batch_size=batch_size, shuffle=True,
+        train_dataset_small, batch_size=args.batch_size, shuffle=True,
         num_workers=max(8, 2*torch.cuda.device_count()), 
         pin_memory=True, drop_last=False
     )
@@ -246,72 +251,51 @@ def load_dataset():
 
     valloader = torch.utils.data.DataLoader(
         val_dataset_small,
-        batch_size=batch_size, shuffle=False,
+        batch_size=args.batch_size, shuffle=False,
         num_workers=max(8, 2*torch.cuda.device_count()), 
         pin_memory=True, drop_last=False
     )
 
     return trainloader, valloader
 
-
-
-
-#now using image files, perform inference with clip and print the number correct
-correct_count = 0
-predictions=[]
-ground_truths =[]
-# dataset = YouHomeDataset("/home/abhi/research/SmartHome/Data/youhome_mp4_data/mp4data")
-crop_scale = 0.08
-if use_transforms:
-    train_transforms = transforms.Compose([
-        transforms.RandomResizedCrop(224, scale=(crop_scale, 1.0)), 
-        # util.Lighting(lighting_param),
-        transforms.RandomHorizontalFlip(), #default 50% chance flip
-        transforms.RandomRotation(degrees=10),
-        transforms.ToTensor()
-        # transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.25, 0.25, 0.25])
-        # normalize,
-    ])
-else:
-    train_transforms = None
-
-
 dataloader_train, dataloader_test = load_dataset()
 # maybe later
-# class EventModel(nn.Module):
-#     def __init__(self):
-#         super(EventModel, self).__init__()
-#         self.base = torchvision.models.resnet18(pretrained=False)
-#         self.in_head = 
-#         self.out_head = 
+class EventModel(nn.Module):
+    def __init__(self):
+        super(EventModel, self).__init__()
+        # self.foundation = CLIP()
+        if args.adapt_module=='resnet':
+            #resnet version
+            self.adapt_model = torchvision.models.resnet18(weights=None) #randomly initialized weights
+            num_features = adapt_model.fc.in_features #need to change output to match our number of classes
+            self.adapt_model.fc = nn.Linear(num_features, len(gt_labels))
+            self.adapt_model.conv1 = nn.Sequential(nn.Linear(512,32*32*3),nn.Unflatten(1,(3,32,32)),adapt_model.conv1)
+        elif args.adapt_module=='MLP':
+            # # MLP Version:
+            if args.combine_text:
+                self.adapt_model = torchvision.ops.MLP(args.num_classes,[256,128,args.num_classes]) #because clip's model.encode(0 results in batch_sizex512)
+            else:
+                self.adapt_model = torchvision.ops.MLP(512,[256,128,args.num_classes]) #because clip's model.encode(0 results in batch_sizex512)
+        else:
+            raise Exception(f"incorrect args.adapt_module {args.adapt_module}")
 
+    def forward(self, x):
+        return self.adapt_model(x)
 
 
 #training adaption module
 #https://medium.com/nerd-for-tech/image-classification-using-transfer-learning-pytorch-resnet18-32b642148cbe
 
-# #resnet version
-# adapt_model = torchvision.models.resnet18(weights=None) #randomly initialized weights
-# num_features = adapt_model.fc.in_features #need to change output to match our number of classes
-# adapt_model.fc = nn.Linear(num_features, len(gt_labels))
-# adapt_model.conv1 = nn.Sequential(nn.Linear(512,32*32*3),nn.Unflatten(1,(3,32,32)),adapt_model.conv1)
-
-
-# # MLP Version:
-if combine_text:
-    adapt_model = torchvision.ops.MLP(args.num_classes,[256,128,args.num_classes]) #because clip's model.encode(0 results in batch_sizex512)
-else:
-    adapt_model = torchvision.ops.MLP(512,[256,128,args.num_classes]) #because clip's model.encode(0 results in batch_sizex512)
-
-
-adapt_model = adapt_model.to(device)
+# adapt_model = adapt_model.to(device)
+adapt_model = EventModel().to(device)
 criterion =  nn.CrossEntropyLoss()
-optimizer = optim.Adam(adapt_model.parameters(),lr=learning_rate, weight_decay=args.decay)#optim.SGD(adapt_model.parameters(),lr=learning_rate, momentum=.9) # lr=.001
+optimizer = optim.Adam(adapt_model.parameters(),lr=args.learning_rate, weight_decay=args.decay)#optim.SGD(adapt_model.parameters(),lr=learning_rate, momentum=.9) # lr=.001
 scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=25)
 
+#train loop
 start_time = time.time() #(for showing time)
-if train and use_adaptation_module:
-    for epoch in range(num_epochs):
+if args.train and args.use_adaptation_module:
+    for epoch in range(args.num_epochs):
         adapt_model.train()
         running_loss = 0.
         running_corrects = 0
@@ -319,7 +303,7 @@ if train and use_adaptation_module:
             image_features = model.encode_image(images.to(device))
             text_features = model.encode_text(text.to(device))
             labels = labels.to(device)
-            if combine_text:
+            if args.combine_text:
                 image_features_normed = image_features/image_features.norm(dim=-1, keepdim=True)
                 text_features_normed = text_features/text_features.norm(dim=-1, keepdim=True)
                 image_features = image_features_normed @ text_features_normed.T
@@ -367,7 +351,7 @@ if train and use_adaptation_module:
                     image_features = model.encode_image(images.to(device))
                     text_features = model.encode_text(text)
                     labels = labels.to(device)
-                    if combine_text:
+                    if args.combine_text:
                         image_features_normed = image_features/image_features.norm(dim=-1, keepdim=True)
                         text_features_normed = text_features/text_features.norm(dim=-1, keepdim=True)
                         image_features = image_features_normed @ text_features_normed.T
@@ -392,12 +376,12 @@ if train and use_adaptation_module:
     torch.save(adapt_model.state_dict(), 'models/'+run_name+'.pth')
 
 
-if not train:
+if not args.train:
     adapt_model.load_state_dict(torch.load('models/'+run_name+'.pth'))
     print("Successfully loaded:",'models/'+run_name+'.pth')
 print("Performing final evaluation")
 
-#Run one last evaluation for the confusion matrix
+#Run last evaluation for the confusion matrix
 adapt_model.eval()
 with torch.no_grad():
     running_loss = 0.
@@ -409,15 +393,15 @@ with torch.no_grad():
         image_features = model.encode_image(images.to(device))
         text_features = model.encode_text(text)
         labels = labels.to(device)
-        if combine_text or not use_adaptation_module:
+        if args.combine_text or not args.use_adaptation_module:
             image_features_normed = image_features/image_features.norm(dim=-1, keepdim=True)
             text_features_normed = text_features/text_features.norm(dim=-1, keepdim=True)
-            if combine_text:
+            if args.combine_text:
                 image_features = image_features_normed @ text_features_normed.T
 
         if DEBUG: print("image_features",image_features.shape,"text_features",text_features.shape)
 
-        outputs = adapt_model(image_features.float()) if use_adaptation_module else (100.0 * image_features @ text_features.T).softmax(dim=-1)
+        outputs = adapt_model(image_features.float()) if args.use_adaptation_module else (100.0 * image_features @ text_features.T).softmax(dim=-1)
         _, preds = torch.max(outputs, 1)
         running_preds = np.concatenate((running_preds,preds.cpu().numpy()))
         running_labels = np.concatenate((running_labels,labels.cpu().numpy()))
@@ -428,6 +412,7 @@ with torch.no_grad():
     epoch_acc = running_corrects / len(dataloader_test.dataset) * 100.
     # print('FINAL [Test #{}] Loss: {:.4f} Acc: {:.4f}% Time: {:.4f}s'.format(epoch, epoch_loss, epoch_acc, time.time()- start_time))
 
+#Confusion Matrix
 if DEBUG: print("running_preds",running_preds.shape, "running_labels",running_labels.shape)
 #https://stackoverflow.com/questions/65618137/confusion-matrix-for-multiple-classes-in-python
 cm = metrics.confusion_matrix(running_labels,running_preds,labels=list(range(args.num_classes)))
@@ -439,10 +424,10 @@ sns.heatmap(cm, annot=True, ax = ax, fmt = 'g'); #annot=True to annotate cells
 ax.set_xlabel('Predicted', fontsize=20)
 ax.xaxis.set_label_position('bottom')
 plt.xticks(rotation=90)
-ax.xaxis.set_ticklabels(np.array(gt_labels if with_subevents else words) , fontsize = 10)
+ax.xaxis.set_ticklabels(np.array(gt_labels if args.with_subevents else words) , fontsize = 10)
 ax.xaxis.tick_bottom()
 ax.set_ylabel('True', fontsize=20)
-ax.yaxis.set_ticklabels(np.array(gt_labels if with_subevents else words), fontsize = 10)
+ax.yaxis.set_ticklabels(np.array(gt_labels if args.with_subevents else words), fontsize = 10)
 plt.yticks(rotation=0)
 plt.title(run_name+f"_Acc:{epoch_acc}", fontsize=20)
 plt.savefig('CMs/'+run_name+'.png')
