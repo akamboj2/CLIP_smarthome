@@ -36,6 +36,9 @@ import argparse
 
 #Parameters to set 
 DEBUG = 0 #note debug only runs one iteration
+device = "cuda" if torch.cuda.is_available() else "cpu"
+
+
 parser = argparse.ArgumentParser(description='Youhome Clip Adaptation module')
 parser.add_argument('--data_dir', '-d', type=str, default='/home/abhi/research/SmartHome/Data/full_data',
                     help='path to the dataset directory')
@@ -49,15 +52,8 @@ parser.add_argument('--with_subevents',type=bool, default=True, help="Set to Tru
 parser.add_argument('--combine_text',type=bool, default=False, help="Set to True when combining Text with images as input from CLIP's output to adaptation module")
 parser.add_argument('--use_adaptation_module',type=bool, default=True, help="Set to True when when using adaptation module")
 parser.add_argument('--adapt_module',type=str, default='MLP', help="type of adaptation module to use - defaults to resnet")
-
 args = parser.parse_args()
 
-#set run name
-if DEBUG:
-    run_name='debugging'
-else:
-    run_name=f"test_with_subevents_{args.with_subevents}_lr_{args.learning_rate}_epochs_{args.num_epochs}_person_generalize" 
-print("Running:", run_name)
 
 
 # Setup labels as captions
@@ -194,16 +190,6 @@ else:
 assert args.num_classes== (len(gt_labels) if args.with_subevents else len(words)), \
     f"expected num_classes = number of ground truth labels: {args.num_classes}  = {gt_labels}"
 
-#Log loss train and validation loss on Tensorboard
-log_dir = Path('log_dir') / run_name 
-log_dir.mkdir(parents=True, exist_ok=True)
-train_writer = SummaryWriter(log_dir/'train')
-val_writer = SummaryWriter(log_dir / 'val')
-
-#Set up pretrained CLIP model and input labels
-device = "cuda" if torch.cuda.is_available() else "cpu"
-
-
 #function to load dataset
 def load_dataset():
     traindir = os.path.join(args.data_dir, 'train')
@@ -256,7 +242,6 @@ def load_dataset():
 
     return trainloader, valloader
 
-dataloader_train, dataloader_test = load_dataset()
 # maybe later
 class EventModel(nn.Module):
     def __init__(self):
@@ -304,141 +289,142 @@ class EventModel(nn.Module):
 
         return outputs
 
+# train function
+def train(dataloader_train, dataloader_test, model, criterion, optimizer, scheduler, train_writer, val_writer, run_name):
+    start_time = time.time() #(for showing time)
+    if args.train and args.use_adaptation_module:
+        for epoch in range(args.num_epochs):
+            model.train()
+            running_loss = 0.
+            running_corrects = 0
+            for ind, (images,labels) in tqdm(enumerate(dataloader_train),total=len(dataloader_train)):
+                labels = labels.to(device)
 
-#training adaption module
-#https://medium.com/nerd-for-tech/image-classification-using-transfer-learning-pytorch-resnet18-32b642148cbe
+                optimizer.zero_grad()
+                outputs = model(images)
+                _, preds = torch.max(outputs,1)
+                loss = criterion(outputs,labels)
 
-# adapt_model = adapt_model.to(device)
-event_model = EventModel().to(device)
-criterion =  nn.CrossEntropyLoss()
-optimizer = optim.Adam(event_model.parameters(),lr=args.learning_rate, weight_decay=args.decay)
-scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=25)
+                #get loss and update weights
+                loss.backward()
+                optimizer.step()
 
-#train loop
-start_time = time.time() #(for showing time)
-if args.train and args.use_adaptation_module:
-    for epoch in range(args.num_epochs):
-        event_model.train()
+                running_loss += loss.item()* images.size(0) #weight by batch size
+                running_corrects += torch.sum(preds == labels.data) 
+
+                if ind %100==0:
+                    # name, value, iteration
+                    train_writer.add_scalar("loss",loss.item(),ind+epoch*len((dataloader_train)))
+
+            epoch_loss = running_loss / len(dataloader_train.dataset)
+            epoch_acc = running_corrects / len(dataloader_train.dataset) * 100
+            print('[Train #{}] Loss: {:.4f} Acc: {:.4f}% Time: {:.4f}s'.format(epoch, epoch_loss, epoch_acc, time.time() -start_time))
+            train_writer.add_scalar("epoch_loss",epoch_loss,epoch)
+            train_writer.add_scalar("epoch_acc",epoch_acc,epoch)
+
+            # update the learning rate
+            scheduler.step()
+
+            # save model
+            print("Intermediate model save as ", 'models/'+run_name+'.pth')
+            torch.save(model.state_dict(), 'models/'+run_name+'.pth')
+
+            #perform evaluation
+            if epoch%5==0:
+                eval(dataloader_test, model, criterion, val_writer, epoch)
+
+            
+        print("Finished training, saving model as ", 'models/'+run_name+'.pth')
+        torch.save(model.state_dict(), 'models/'+run_name+'.pth')
+
+def eval(dataloader_test, model, criterion, val_writer, epoch=0, return_predictions=False):
+    # perform evaluation, returns all predictions and labels in dataloader_test
+    if DEBUG: print("VALIDATING MODEL")
+    model.eval()
+    with torch.no_grad():
         running_loss = 0.
         running_corrects = 0
-        for ind, (images,labels) in tqdm(enumerate(dataloader_train),total=len(dataloader_train)):
+        if return_predictions: #for confusion matrix hold labels/predictions
+            running_labels = np.array([])
+            running_preds = np.array([])
+        for ind, (images,labels) in tqdm(enumerate(dataloader_test),total=len(dataloader_test)):
             labels = labels.to(device)
-
-            optimizer.zero_grad()
-            outputs = event_model(images)
-            _, preds = torch.max(outputs,1)
-            loss = criterion(outputs,labels)
-
-            #get loss and update weights
-            loss.backward()
-            optimizer.step()
-
-            running_loss += loss.item()* images.size(0) #weight by batch size
-            running_corrects += torch.sum(preds == labels.data) 
-
-            if ind %100==0:
-                # name, value, iteration
-                train_writer.add_scalar("loss",loss.item(),ind+epoch*len((dataloader_train)))
-
-        epoch_loss = running_loss / len(dataloader_train.dataset)
-        epoch_acc = running_corrects / len(dataloader_train.dataset) * 100
-        print('[Train #{}] Loss: {:.4f} Acc: {:.4f}% Time: {:.4f}s'.format(epoch, epoch_loss, epoch_acc, time.time() -start_time))
-        train_writer.add_scalar("epoch_loss",epoch_loss,epoch)
-        train_writer.add_scalar("epoch_acc",epoch_acc,epoch)
-
-        # update the learning rate
-        scheduler.step()
-
-        # save model
-        print("Intermediate model save as ", 'models/'+run_name+'.pth')
-        torch.save(event_model.state_dict(), 'models/'+run_name+'.pth')
-
-        if epoch%5==0 or epoch==args.num_epochs-1:
-            # perform eval every 5 epochs (and last epoch for confusion matrix)
-            if DEBUG: print("VALIDATING MODEL")
-            event_model.eval()
-            with torch.no_grad():
-                running_loss = 0.
-                running_corrects = 0
-                if epoch==args.num_epochs-1: #for confusion matrix hold labels/predictions
-                    running_labels = np.array([])
-                    running_preds = np.array([])
-                for ind, (images,labels) in tqdm(enumerate(dataloader_test),total=len(dataloader_test)):
-                    labels = labels.to(device)
-                    outputs = event_model(images)
-                    _, preds = torch.max(outputs, 1)
-                    if epoch==args.num_epochs-1:
-                        running_preds = np.concatenate((running_preds,preds.cpu().numpy()))
-                        running_labels = np.concatenate((running_labels,labels.cpu().numpy()))
-                    loss = criterion(outputs, labels)
-                    running_loss += loss.item() * images.size(0)
-                    running_corrects += torch.sum(preds == labels.data)
-                epoch_loss = running_loss / len(dataloader_test.dataset)
-                epoch_acc = running_corrects / len(dataloader_test.dataset) * 100.
-                print('[Test #{}] Loss: {:.4f} Acc: {:.4f}% Time: {:.4f}s'.format(epoch, epoch_loss, epoch_acc, time.time()- start_time))
-                val_writer.add_scalar("epoch_loss",epoch_loss,epoch)
-                val_writer.add_scalar("epoch_acc",epoch_acc,epoch)
-                if DEBUG: break
-
+            outputs = model(images)
+            _, preds = torch.max(outputs, 1)
+            if return_predictions:
+                running_preds = np.concatenate((running_preds,preds.cpu().numpy()))
+                running_labels = np.concatenate((running_labels,labels.cpu().numpy()))
+            loss = criterion(outputs, labels)
+            running_loss += loss.item() * images.size(0)
+            running_corrects += torch.sum(preds == labels.data)
+        epoch_loss = running_loss / len(dataloader_test.dataset)
+        epoch_acc = running_corrects / len(dataloader_test.dataset) * 100.
+        if return_predictions:
+            print('[Test #{}] Loss: {:.4f} Acc: {:.4f}%'.format('eval', epoch_loss, epoch_acc))
+            val_writer.add_scalar("epoch_loss",epoch_loss,epoch)
+            val_writer.add_scalar("epoch_acc",epoch_acc,epoch)
+        else:
+            print('[Test #{}] Loss: {:.4f} Acc: {:.4f}%'.format(epoch, epoch_loss, epoch_acc))
+            val_writer.add_scalar("epoch_loss",epoch_loss,epoch)
+            val_writer.add_scalar("epoch_acc",epoch_acc,epoch)
+            running_preds,running_labels = None, None
         
-    print("Finished training, saving model as ", 'models/'+run_name+'.pth')
-    torch.save(event_model.state_dict(), 'models/'+run_name+'.pth')
+        return epoch_loss, epoch_acc, running_preds, running_labels
 
-if not args.train:
-    event_model.load_state_dict(torch.load('models/'+run_name+'.pth'))
-    print("Successfully loaded:",'models/'+run_name+'.pth')
-print("Performing final evaluation")
+    
+def main():
+    #set run name
+    if DEBUG:
+        run_name='debugging'
+    else:
+        run_name=f"test_with_subevents_{args.with_subevents}_lr_{args.learning_rate}_epochs_{args.num_epochs}_person_generalize" 
+    print("Running:", run_name)
+
+    #Log loss train and validation loss on Tensorboard
+    log_dir = Path('log_dir') / run_name 
+    log_dir.mkdir(parents=True, exist_ok=True)
+    train_writer = SummaryWriter(log_dir/'train')
+    val_writer = SummaryWriter(log_dir / 'val')
+
+    #setup model and training materials 
+    dataloader_train, dataloader_test = load_dataset()
+    event_model = EventModel().to(device)
+    criterion =  nn.CrossEntropyLoss()
+    optimizer = optim.Adam(event_model.parameters(),lr=args.learning_rate, weight_decay=args.decay)
+    scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=25)
+
+    #train loop
+    train(dataloader_train, dataloader_test, event_model, criterion, optimizer, scheduler, train_writer, val_writer, run_name)
+    
+    #Just run evaluation
+    if not args.train:
+        event_model.load_state_dict(torch.load('models/'+run_name+'.pth'))
+        print("Successfully loaded:",'models/'+run_name+'.pth')
+        print("Performing final evaluation")
+    eval_loss, eval__acc, running_preds,running_labels= eval(dataloader_test, event_model, criterion, val_writer, return_predictions=True)
+
+    #Confusion Matrix
+    if DEBUG: print("running_preds",running_preds.shape, "running_labels",running_labels.shape)
+    #https://stackoverflow.com/questions/65618137/confusion-matrix-for-multiple-classes-in-python
+    cm = metrics.confusion_matrix(running_labels,running_preds,labels=list(range(args.num_classes)))
+    # Plot confusion matrix in a beautiful manner
+    fig = plt.figure(figsize=(30,30))
+    ax= plt.subplot()
+    sns.heatmap(cm, annot=True, ax = ax, fmt = 'g'); #annot=True to annotate cells
+    # labels, title and ticks
+    ax.set_xlabel('Predicted', fontsize=20)
+    ax.xaxis.set_label_position('bottom')
+    plt.xticks(rotation=90)
+    ax.xaxis.set_ticklabels(np.array(gt_labels if args.with_subevents else words) , fontsize = 10)
+    ax.xaxis.tick_bottom()
+    ax.set_ylabel('True', fontsize=20)
+    ax.yaxis.set_ticklabels(np.array(gt_labels if args.with_subevents else words), fontsize = 10)
+    plt.yticks(rotation=0)
+    plt.title(run_name+f"_Acc:{eval__acc}", fontsize=20)
+    plt.savefig('CMs/'+run_name+'.png')
+    plt.show()
 
 
-#Confusion Matrix
-if DEBUG: print("running_preds",running_preds.shape, "running_labels",running_labels.shape)
-#https://stackoverflow.com/questions/65618137/confusion-matrix-for-multiple-classes-in-python
-cm = metrics.confusion_matrix(running_labels,running_preds,labels=list(range(args.num_classes)))
-# Plot confusion matrix in a beautiful manner
-fig = plt.figure(figsize=(30,30))
-ax= plt.subplot()
-sns.heatmap(cm, annot=True, ax = ax, fmt = 'g'); #annot=True to annotate cells
-# labels, title and ticks
-ax.set_xlabel('Predicted', fontsize=20)
-ax.xaxis.set_label_position('bottom')
-plt.xticks(rotation=90)
-ax.xaxis.set_ticklabels(np.array(gt_labels if args.with_subevents else words) , fontsize = 10)
-ax.xaxis.tick_bottom()
-ax.set_ylabel('True', fontsize=20)
-ax.yaxis.set_ticklabels(np.array(gt_labels if args.with_subevents else words), fontsize = 10)
-plt.yticks(rotation=0)
-plt.title(run_name+f"_Acc:{epoch_acc}", fontsize=20)
-plt.savefig('CMs/'+run_name+'.png')
-plt.show()
+if __name__ == "__main__":
+    main()
 
-
-
-
-# TODO: 
-# try another super lightweight convolution model, maybe even make your own
-
-
-""""
-To Ask Neo:
-- 31 events? i'm counting 29 in all the folders - that was an old dataset
-- what is binary_react dataset? not sure naming as Junhao, it's not that relevant
-- was it tested on Toyota dataset? - Toyota ADL, similar to ours
-
-Ask Junhao?
-- in load dataset what is the random subset for? why not use all the data? - Just because we have so much of the same data, the subset is just to decrease the amount of data we have. 
-- what are the bumps every 25 epochs in your train graph? - learning rate scheduler, every 25 epochs turn down learning rate.
-- train-val split for 98% ? - whatever we had 70-30 or 75-25. Note They are purposefully letting the model overfit to the environment and the room because they are assuming
-that this camera would be in the same home with that same person.
-- - cross camera challenge, 3 cameras in one room recording the same activity at the same time but not doing the 
-- - overfitting in our case may not be a problem, because people in the same home will look around the same and act about the same as well
-- - paper: can you infer this action based on where the user is sitting -> context dependent
-- - take two shots on the same activity and take the first as training and validation, understand generilizability of the model
-
-
-what to aim for according to Junhao, train on other data as well. 
-- imagine a use case, how do you apply this foundation model to. If we have thousands of households.  if we can use 
-our data to create 3-5 house holds in 30 activities , in 5 homes, each home would do 7-8 activites
-use one model to serve all 5 homes - make this scalable
-
-generalizability - specific part of data set to a 
-"""
