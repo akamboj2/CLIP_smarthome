@@ -202,9 +202,7 @@ val_writer = SummaryWriter(log_dir / 'val')
 
 #Set up pretrained CLIP model and input labels
 device = "cuda" if torch.cuda.is_available() else "cpu"
-model, preprocess = clip.load("ViT-B/32", device=device)
-if args.with_subevents: words = sentences
-text = clip.tokenize([template + w for w in words]).to(device)
+
 
 #function to load dataset
 def load_dataset():
@@ -263,13 +261,23 @@ dataloader_train, dataloader_test = load_dataset()
 class EventModel(nn.Module):
     def __init__(self):
         super(EventModel, self).__init__()
-        # self.foundation = CLIP()
+        
+        #setup foundation model
+        self.foundation_model, self.preprocess = clip.load("ViT-B/32", device=device)
+        if args.with_subevents: words = sentences
+        self.text = clip.tokenize([template + w for w in words]).to(device)
+
+        #freeze foundation model so we don't train it.
+        for param in self.foundation_model.parameters():
+            param.requires_grad = False
+
+        #setup adaptation module
         if args.adapt_module=='resnet':
             #resnet version
             self.adapt_model = torchvision.models.resnet18(weights=None) #randomly initialized weights
-            num_features = adapt_model.fc.in_features #need to change output to match our number of classes
+            num_features = self.adapt_model.fc.in_features #need to change output to match our number of classes
             self.adapt_model.fc = nn.Linear(num_features, len(gt_labels))
-            self.adapt_model.conv1 = nn.Sequential(nn.Linear(512,32*32*3),nn.Unflatten(1,(3,32,32)),adapt_model.conv1)
+            self.adapt_model.conv1 = nn.Sequential(nn.Linear(512,32*32*3),nn.Unflatten(1,(3,32,32)),self.adapt_model.conv1)
         elif args.adapt_module=='MLP':
             # # MLP Version:
             if args.combine_text:
@@ -279,41 +287,45 @@ class EventModel(nn.Module):
         else:
             raise Exception(f"incorrect args.adapt_module {args.adapt_module}")
 
-    def forward(self, x):
-        return self.adapt_model(x)
+    def forward(self, images):
+
+        image_features = self.foundation_model.encode_image(images.to(device))
+        text_features = self.foundation_model.encode_text(self.text.to(device))
+        if args.combine_text:
+            image_features_normed = image_features/image_features.norm(dim=-1, keepdim=True)
+            text_features_normed = text_features/text_features.norm(dim=-1, keepdim=True)
+            image_features = image_features_normed @ text_features_normed.T
+            
+
+        if DEBUG: print("image_features",image_features.shape,"text_features",text_features.shape)
+        # image_features torch.Size([32, 512]) text_features torch.Size([29, 512])
+        
+        outputs = self.adapt_model(image_features.float())
+
+        return outputs
 
 
 #training adaption module
 #https://medium.com/nerd-for-tech/image-classification-using-transfer-learning-pytorch-resnet18-32b642148cbe
 
 # adapt_model = adapt_model.to(device)
-adapt_model = EventModel().to(device)
+event_model = EventModel().to(device)
 criterion =  nn.CrossEntropyLoss()
-optimizer = optim.Adam(adapt_model.parameters(),lr=args.learning_rate, weight_decay=args.decay)#optim.SGD(adapt_model.parameters(),lr=learning_rate, momentum=.9) # lr=.001
+optimizer = optim.Adam(event_model.parameters(),lr=args.learning_rate, weight_decay=args.decay)
 scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=25)
 
 #train loop
 start_time = time.time() #(for showing time)
 if args.train and args.use_adaptation_module:
     for epoch in range(args.num_epochs):
-        adapt_model.train()
+        event_model.train()
         running_loss = 0.
         running_corrects = 0
         for ind, (images,labels) in tqdm(enumerate(dataloader_train),total=len(dataloader_train)):
-            image_features = model.encode_image(images.to(device))
-            text_features = model.encode_text(text.to(device))
             labels = labels.to(device)
-            if args.combine_text:
-                image_features_normed = image_features/image_features.norm(dim=-1, keepdim=True)
-                text_features_normed = text_features/text_features.norm(dim=-1, keepdim=True)
-                image_features = image_features_normed @ text_features_normed.T
-                
-
-            if DEBUG: print("image_features",image_features.shape,"text_features",text_features.shape)
-            # image_features torch.Size([32, 512]) text_features torch.Size([29, 512])
 
             optimizer.zero_grad()
-            outputs = adapt_model(image_features.float())
+            outputs = event_model(images)
             _, preds = torch.max(outputs,1)
             loss = criterion(outputs,labels)
 
@@ -321,8 +333,8 @@ if args.train and args.use_adaptation_module:
             loss.backward()
             optimizer.step()
 
-            running_loss += loss.item()* images.size(0) #is this a thing? weight by the batch size?
-            running_corrects += torch.sum(preds == labels.data) #why labels.data here?
+            running_loss += loss.item()* images.size(0) #weight by batch size
+            running_corrects += torch.sum(preds == labels.data) 
 
             if ind %100==0:
                 # name, value, iteration
@@ -337,29 +349,27 @@ if args.train and args.use_adaptation_module:
         # update the learning rate
         scheduler.step()
 
+        # save model
         print("Intermediate model save as ", 'models/'+run_name+'.pth')
-        torch.save(adapt_model.state_dict(), 'models/'+run_name+'.pth')
-        if epoch%5 ==0:
-            #This loop is for performing testing/evaluation
-            print("VALIDATING MODEL")
-            adapt_model.eval()
+        torch.save(event_model.state_dict(), 'models/'+run_name+'.pth')
+
+        if epoch%5==0 or epoch==args.num_epochs-1:
+            # perform eval every 5 epochs (and last epoch for confusion matrix)
+            if DEBUG: print("VALIDATING MODEL")
+            event_model.eval()
             with torch.no_grad():
                 running_loss = 0.
                 running_corrects = 0
+                if epoch==args.num_epochs-1: #for confusion matrix hold labels/predictions
+                    running_labels = np.array([])
+                    running_preds = np.array([])
                 for ind, (images,labels) in tqdm(enumerate(dataloader_test),total=len(dataloader_test)):
-                    # print(type(images)) #it's a torch tensor
-                    image_features = model.encode_image(images.to(device))
-                    text_features = model.encode_text(text)
                     labels = labels.to(device)
-                    if args.combine_text:
-                        image_features_normed = image_features/image_features.norm(dim=-1, keepdim=True)
-                        text_features_normed = text_features/text_features.norm(dim=-1, keepdim=True)
-                        image_features = image_features_normed @ text_features_normed.T
-
-                    if DEBUG: print("image_features",image_features.shape,"text_features",text_features.shape)
-
-                    outputs = adapt_model(image_features.float())
+                    outputs = event_model(images)
                     _, preds = torch.max(outputs, 1)
+                    if epoch==args.num_epochs-1:
+                        running_preds = np.concatenate((running_preds,preds.cpu().numpy()))
+                        running_labels = np.concatenate((running_labels,labels.cpu().numpy()))
                     loss = criterion(outputs, labels)
                     running_loss += loss.item() * images.size(0)
                     running_corrects += torch.sum(preds == labels.data)
@@ -370,47 +380,15 @@ if args.train and args.use_adaptation_module:
                 val_writer.add_scalar("epoch_acc",epoch_acc,epoch)
                 if DEBUG: break
 
-
         
     print("Finished training, saving model as ", 'models/'+run_name+'.pth')
-    torch.save(adapt_model.state_dict(), 'models/'+run_name+'.pth')
-
+    torch.save(event_model.state_dict(), 'models/'+run_name+'.pth')
 
 if not args.train:
-    adapt_model.load_state_dict(torch.load('models/'+run_name+'.pth'))
+    event_model.load_state_dict(torch.load('models/'+run_name+'.pth'))
     print("Successfully loaded:",'models/'+run_name+'.pth')
 print("Performing final evaluation")
 
-#Run last evaluation for the confusion matrix
-adapt_model.eval()
-with torch.no_grad():
-    running_loss = 0.
-    running_corrects = 0
-    running_labels = np.array([])
-    running_preds = np.array([])
-    for ind, (images,labels) in tqdm(enumerate(dataloader_test),total=len(dataloader_test)):
-        # print(type(images)) #it's a torch tensor
-        image_features = model.encode_image(images.to(device))
-        text_features = model.encode_text(text)
-        labels = labels.to(device)
-        if args.combine_text or not args.use_adaptation_module:
-            image_features_normed = image_features/image_features.norm(dim=-1, keepdim=True)
-            text_features_normed = text_features/text_features.norm(dim=-1, keepdim=True)
-            if args.combine_text:
-                image_features = image_features_normed @ text_features_normed.T
-
-        if DEBUG: print("image_features",image_features.shape,"text_features",text_features.shape)
-
-        outputs = adapt_model(image_features.float()) if args.use_adaptation_module else (100.0 * image_features @ text_features.T).softmax(dim=-1)
-        _, preds = torch.max(outputs, 1)
-        running_preds = np.concatenate((running_preds,preds.cpu().numpy()))
-        running_labels = np.concatenate((running_labels,labels.cpu().numpy()))
-        loss = criterion(outputs, labels)
-        running_loss += loss.item() * images.size(0)
-        running_corrects += torch.sum(preds == labels.data)
-    epoch_loss = running_loss / len(dataloader_test.dataset)
-    epoch_acc = running_corrects / len(dataloader_test.dataset) * 100.
-    # print('FINAL [Test #{}] Loss: {:.4f} Acc: {:.4f}% Time: {:.4f}s'.format(epoch, epoch_loss, epoch_acc, time.time()- start_time))
 
 #Confusion Matrix
 if DEBUG: print("running_preds",running_preds.shape, "running_labels",running_labels.shape)
@@ -437,33 +415,20 @@ plt.show()
 
 
 # TODO: 
-# setup argparser
-# attemp to make this a custom model and push that
 # try another super lightweight convolution model, maybe even make your own
-# if time is an issue, try using XACC
-#   but according to here: https://timdettmers.com/2020/09/07/which-gpu-for-deep-learning/#How_do_GPUs_work
-#   seems like 3080 always performs better than titan rtx despite titan having more gpu memory (24 vs 10 GB)
 
-
-#IF it doesn't work:
-# - try with a different train test split (move one p folder from test to train)
-# - try USING the text embeddings, instead of predicting only from image. 
-#       to do this, output batch_sizex512 vector than do the top5 style similarity score
-    # OR multiply img embedding by text embedding, flatten that matrix and pass that through a few linear layers (MLP) 
-    # and train that to output correct classes
-# instead of sampling Every frame, sample every 10 frames or 25 frames (25 frames at 25 fps would be 1 hz)
-# logistic regression with augmented data
 
 """"
 To Ask Neo:
-- 31 events? i'm counting 29 in all the folders
-- what is binary_react dataset?
-- was it tested on Toyota dataset?
+- 31 events? i'm counting 29 in all the folders - that was an old dataset
+- what is binary_react dataset? not sure naming as Junhao, it's not that relevant
+- was it tested on Toyota dataset? - Toyota ADL, similar to ours
 
 Ask Junhao?
-- in load dataset what is the random subset for? why not use all the data?
+- in load dataset what is the random subset for? why not use all the data? - Just because we have so much of the same data, the subset is just to decrease the amount of data we have. 
 - what are the bumps every 25 epochs in your train graph? - learning rate scheduler, every 25 epochs turn down learning rate.
-- train-val split? - 98%
+- train-val split for 98% ? - whatever we had 70-30 or 75-25. Note They are purposefully letting the model overfit to the environment and the room because they are assuming
+that this camera would be in the same home with that same person.
 - - cross camera challenge, 3 cameras in one room recording the same activity at the same time but not doing the 
 - - overfitting in our case may not be a problem, because people in the same home will look around the same and act about the same as well
 - - paper: can you infer this action based on where the user is sitting -> context dependent
