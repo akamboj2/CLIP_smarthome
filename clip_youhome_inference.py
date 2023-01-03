@@ -3,8 +3,12 @@
 #new dataset --data_dir /home/abhi/research/SmartHome/Data/imgdata4event_2021_full_cropped
 # generalization dataset --data_dir /home/abhi/research/SmartHome/Data/person_generalize
 
+# python clip_youhome_inference.py --num_classes 29 --save False --data_dir ../Data/image_folder_yolo_cropped_data
+#first test to make sure everything is good
+#try generalization with freezing and without freezing
 
 
+# python clip_youhome_inference.py --data_dir /home/abhi/research/SmartHome/Data/person_generalize --num_classes 29 --save True --unfreeze True --adapt_module MLP --name clipsh | tee log_outs/clipsh_mlp.txt
 
 #for baseline clip inference and analysis
 import torch
@@ -33,6 +37,8 @@ from pathlib import Path
 import random
 import argparse
 
+#debugging
+import math
 
 #Parameters to set 
 DEBUG = 0 #note debug only runs one iteration
@@ -52,8 +58,13 @@ parser.add_argument('--with_subevents',type=bool, default=True, help="Set to Tru
 parser.add_argument('--combine_text',type=bool, default=False, help="Set to True when combining Text with images as input from CLIP's output to adaptation module")
 parser.add_argument('--use_adaptation_module',type=bool, default=True, help="Set to True when when using adaptation module")
 parser.add_argument('--adapt_module',type=str, default='MLP', help="type of adaptation module to use - defaults to resnet")
+parser.add_argument('--save',type=bool, default=False, help="type of adaptation module to use - defaults to resnet")
+parser.add_argument('--unfreeze',type=bool, default=False, help="unfreeze CLIP backbone to finetune CLIP weights as well")
+parser.add_argument('--name',type=str, default='debug_name', help="name to prefix run save folder with")
+
 args = parser.parse_args()
 
+print("UNFREEZE is", args.unfreeze)
 
 
 # Setup labels as captions
@@ -190,6 +201,22 @@ else:
 assert args.num_classes== (len(gt_labels) if args.with_subevents else len(words)), \
     f"expected num_classes = number of ground truth labels: {args.num_classes}  = {gt_labels}"
 
+#for debugging:
+class ImageFolderWithPaths(torchvision.datasets.ImageFolder):
+    """Custom dataset that includes image file paths. Extends
+    torchvision.datasets.ImageFolder
+    """
+
+    # override the __getitem__ method. this is the method that dataloader calls
+    def __getitem__(self, index):
+        # this is what ImageFolder normally returns 
+        original_tuple = super(ImageFolderWithPaths, self).__getitem__(index)
+        # the image file path
+        path = self.imgs[index][0]
+        # make a new tuple that includes original and the path
+        tuple_with_path = (original_tuple + (path,))
+        return tuple_with_path
+
 #function to load dataset
 def load_dataset():
     traindir = os.path.join(args.data_dir, 'train')
@@ -204,12 +231,12 @@ def load_dataset():
         # util.Lighting(lighting_param),
         transforms.RandomHorizontalFlip(),
         transforms.RandomRotation(10),
-        transforms.ToTensor()
-        # transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.25, 0.25, 0.25])
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.25, 0.25, 0.25])
         # normalize,
     ])
 
-    train_dataset = torchvision.datasets.ImageFolder(
+    train_dataset = ImageFolderWithPaths( #for debuggging
         traindir,
         transform=train_transforms
     )
@@ -220,7 +247,7 @@ def load_dataset():
     trainloader = torch.utils.data.DataLoader(
         train_dataset_small, batch_size=args.batch_size, shuffle=True,
         num_workers=max(8, 2*torch.cuda.device_count()), 
-        pin_memory=True, drop_last=False
+        pin_memory=True, drop_last=True
     )
 
     val_dataset = torchvision.datasets.ImageFolder(valdir, transforms.Compose([
@@ -248,13 +275,15 @@ class EventModel(nn.Module):
         super(EventModel, self).__init__()
         
         #setup foundation model
-        self.foundation_model, self.preprocess = clip.load("ViT-B/32", device=device)
+        self.foundation_model, self.preprocess = clip.load("ViT-B/32", device=device, jit=False) #for trainging stability turn of jit: https://github.com/openai/CLIP/issues/40
         if args.with_subevents: words = sentences
         self.text = clip.tokenize([template + w for w in words]).to(device)
 
         #freeze foundation model so we don't train it.
-        for param in self.foundation_model.parameters():
-            param.requires_grad = False
+        if not args.unfreeze:
+            for param in self.foundation_model.parameters():
+                param.requires_grad = False
+
 
         #setup adaptation module
         if args.adapt_module=='resnet':
@@ -297,7 +326,24 @@ def train(dataloader_train, dataloader_test, model, criterion, optimizer, schedu
             model.train()
             running_loss = 0.
             running_corrects = 0
-            for ind, (images,labels) in tqdm(enumerate(dataloader_train),total=len(dataloader_train)):
+            # for ind, (images,labels,paths) in tqdm(enumerate(dataloader_train),total=len(dataloader_train)):
+            for ind, (images,labels,paths) in enumerate(dataloader_train):
+                 
+                # #DEBUGGING NAN INF issue, delete until labels= , after issue resolved
+                # for img_index,i in enumerate(images):
+                #     for abnormal in i.flatten():
+                #         abnormal=abnormal.item()
+                #         if math.isnan(abnormal) or math.isinf(abnormal):
+                #             print("ERROR FOUND NAN/INF at img",paths[i])
+                problem = 100
+                print("index",ind)
+                # if ind<99:
+                #     print("skipping ",ind)
+                #     continue
+                # print("about to print issue on",ind)
+
+                assert not np.any(np.isnan(images.numpy()))
+                assert not np.any(np.isnan(labels.numpy()))
                 labels = labels.to(device)
 
                 optimizer.zero_grad()
@@ -311,11 +357,13 @@ def train(dataloader_train, dataloader_test, model, criterion, optimizer, schedu
 
                 running_loss += loss.item()* images.size(0) #weight by batch size
                 running_corrects += torch.sum(preds == labels.data) 
-
+                print("loss is ",loss.item())
                 if ind %100==0:
                     # name, value, iteration
                     train_writer.add_scalar("loss",loss.item(),ind+epoch*len((dataloader_train)))
-
+                # if ind==problem: 
+                #     print("just printed issue")
+                #     exit()
             epoch_loss = running_loss / len(dataloader_train.dataset)
             epoch_acc = running_corrects / len(dataloader_train.dataset) * 100
             print('[Train #{}] Loss: {:.4f} Acc: {:.4f}% Time: {:.4f}s'.format(epoch, epoch_loss, epoch_acc, time.time() -start_time))
@@ -374,10 +422,10 @@ def eval(dataloader_test, model, criterion, val_writer, epoch=0, return_predicti
     
 def main():
     #set run name
-    if DEBUG:
+    if DEBUG or not args.save:
         run_name='debugging'
     else:
-        run_name=f"test_with_subevents_{args.with_subevents}_lr_{args.learning_rate}_epochs_{args.num_epochs}_person_generalize" 
+        run_name=f"{args.name}_{args.adapt_module}_lr_{args.learning_rate}_epochs_{args.num_epochs}" 
     print("Running:", run_name)
 
     #Log loss train and validation loss on Tensorboard
@@ -388,7 +436,7 @@ def main():
 
     #setup model and training materials 
     dataloader_train, dataloader_test = load_dataset()
-    event_model = EventModel().to(device)
+    event_model = EventModel().to(device).float() # float for CLIP training stability https://github.com/openai/CLIP/issues/40
     criterion =  nn.CrossEntropyLoss()
     optimizer = optim.Adam(event_model.parameters(),lr=args.learning_rate, weight_decay=args.decay)
     scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=25)
