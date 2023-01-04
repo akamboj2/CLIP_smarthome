@@ -326,22 +326,8 @@ def train(dataloader_train, dataloader_test, model, criterion, optimizer, schedu
             model.train()
             running_loss = 0.
             running_corrects = 0
-            # for ind, (images,labels,paths) in tqdm(enumerate(dataloader_train),total=len(dataloader_train)):
-            for ind, (images,labels,paths) in enumerate(dataloader_train):
-                 
-                # #DEBUGGING NAN INF issue, delete until labels= , after issue resolved
-                # for img_index,i in enumerate(images):
-                #     for abnormal in i.flatten():
-                #         abnormal=abnormal.item()
-                #         if math.isnan(abnormal) or math.isinf(abnormal):
-                #             print("ERROR FOUND NAN/INF at img",paths[i])
-                problem = 100
-                print("index",ind)
-                # if ind<99:
-                #     print("skipping ",ind)
-                #     continue
-                # print("about to print issue on",ind)
-
+            for ind, (images,labels,paths) in tqdm(enumerate(dataloader_train),total=len(dataloader_train)):
+                
                 assert not np.any(np.isnan(images.numpy()))
                 assert not np.any(np.isnan(labels.numpy()))
                 labels = labels.to(device)
@@ -357,13 +343,11 @@ def train(dataloader_train, dataloader_test, model, criterion, optimizer, schedu
 
                 running_loss += loss.item()* images.size(0) #weight by batch size
                 running_corrects += torch.sum(preds == labels.data) 
-                print("loss is ",loss.item())
+                # print("loss is ",loss.item()) # to check if loss is divergiging
                 if ind %100==0:
                     # name, value, iteration
                     train_writer.add_scalar("loss",loss.item(),ind+epoch*len((dataloader_train)))
-                # if ind==problem: 
-                #     print("just printed issue")
-                #     exit()
+
             epoch_loss = running_loss / len(dataloader_train.dataset)
             epoch_acc = running_corrects / len(dataloader_train.dataset) * 100
             print('[Train #{}] Loss: {:.4f} Acc: {:.4f}% Time: {:.4f}s'.format(epoch, epoch_loss, epoch_acc, time.time() -start_time))
